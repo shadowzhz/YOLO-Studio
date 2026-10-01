@@ -792,13 +792,19 @@ class AnnotationPage(QWidget):
         settings_layout = QVBoxLayout(settings)
         settings_layout.setContentsMargins(10, 10, 10, 10)
         settings_layout.setSpacing(6)
-        settings_layout.addWidget(section("SAM 交互"))
-        settings_layout.addWidget(QLabel("SAM 模型"))
-        settings_layout.addWidget(self.sam_model)
-        settings_layout.addWidget(QLabel("SAM 输出类型"))
-        settings_layout.addWidget(self.sam_output)
-        settings_layout.addWidget(sam_run)
-        settings_layout.addWidget(sam_clear)
+        self.sam_panel = QWidget()
+        sam_panel_layout = QVBoxLayout(self.sam_panel)
+        sam_panel_layout.setContentsMargins(0, 0, 0, 0)
+        sam_panel_layout.setSpacing(6)
+        sam_panel_layout.addWidget(section("SAM 交互"))
+        sam_panel_layout.addWidget(QLabel("SAM 模型"))
+        sam_panel_layout.addWidget(self.sam_model)
+        sam_panel_layout.addWidget(QLabel("SAM 输出类型"))
+        sam_panel_layout.addWidget(self.sam_output)
+        sam_panel_layout.addWidget(sam_run)
+        sam_panel_layout.addWidget(sam_clear)
+        self.sam_panel.setVisible(self.mode_combo.currentData() == "sam")
+        settings_layout.addWidget(self.sam_panel)
         settings_layout.addWidget(section("标注编辑"))
         for button in (previous, next_button, jump_unlabeled, delete_selected, change_selected_class, clear, set_negative, unset_negative, reset_view, grid):
             settings_layout.addWidget(button)
@@ -1009,6 +1015,8 @@ class AnnotationPage(QWidget):
 
     def _set_mode(self, mode: str) -> None:
         self.canvas.set_mode(mode)
+        if hasattr(self, "sam_panel"):
+            self.sam_panel.setVisible(mode == "sam")
         self._update_canvas_status()
 
     def _update_canvas_status(self) -> None:
