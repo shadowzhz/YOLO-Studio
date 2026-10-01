@@ -1677,6 +1677,9 @@ class TrainingPage(QWidget):
         self.start.setObjectName("primaryButton")
         self.stop = QPushButton("停止训练")
         self.stop.setEnabled(False)
+        self.export_model_path = QLineEdit()
+        self.export_model_path.setPlaceholderText("留空默认使用上方模型，或点击右侧浏览指定待导出的权重 (如 best.pt)")
+        self.export_model_browse = QPushButton("浏览")
         self.export_format = QComboBox()
         self.export_format.addItem("ONNX", "onnx")
         self.export_format.addItem("MaixCAM (cvimodel + mud)", "maixcam")
@@ -1797,6 +1800,10 @@ class TrainingPage(QWidget):
         h_imgsz.setContentsMargins(0, 0, 0, 0)
         h_imgsz.addWidget(self.export_imgsz)
 
+        export_model_row = QHBoxLayout()
+        export_model_row.addWidget(self.export_model_path, 1)
+        export_model_row.addWidget(self.export_model_browse)
+        export_form.addRow("待转换模型", export_model_row)
         export_form.addRow("导出格式", self.export_format)
         export_form.addRow(self.maix_preset_label, self.maix_preset_widget)
         export_form.addRow(self.export_imgsz_label, self.imgsz_widget)
@@ -1817,6 +1824,7 @@ class TrainingPage(QWidget):
         self.start.clicked.connect(self.run)
         self.stop.clicked.connect(self.stop_training)
         self.export_button.clicked.connect(self.run_export)
+        self.export_model_browse.clicked.connect(self.choose_export_model)
         self.export_format.currentIndexChanged.connect(self._on_export_format_changed)
         self.maix_preset.currentIndexChanged.connect(self._on_maix_preset_changed)
         self.maix_calib_browse.clicked.connect(self.choose_maix_calib)
@@ -1870,6 +1878,12 @@ class TrainingPage(QWidget):
         if selected:
             self.model.setText(selected)
 
+    def choose_export_model(self) -> None:
+        initial_dir = self.export_model_path.text().strip() or self.model.text().strip() or "."
+        selected, _ = QFileDialog.getOpenFileName(self, "选择待转换模型权重", initial_dir, "模型权重 (*.pt *.onnx);;所有文件 (*.*)")
+        if selected:
+            self.export_model_path.setText(selected)
+
     def choose_data(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "选择数据集配置", self.data.text(), "YAML (*.yaml *.yml);;所有文件 (*.*)")
         if selected:
@@ -1913,12 +1927,16 @@ class TrainingPage(QWidget):
         self._stop_event.set()
 
     def run_export(self) -> None:
+        target_model = self.export_model_path.text().strip() or self.model.text().strip()
+        if not target_model:
+            QMessageBox.warning(self, "模型导出", "请先指定待转换的模型权重路径（例如 best.pt）。")
+            return
         fmt = self.export_format.currentData()
         if fmt == "maixcam":
             preset = self.maix_preset.currentData()
             imgsz_val = self.export_imgsz.text().strip() if preset == "custom" else preset
             config = ExportConfig(
-                model=self.model.text().strip(),
+                model=target_model,
                 format="maixcam",
                 imgsz=imgsz_val,
                 quantize=self.maix_quantize.currentData(),
@@ -1929,7 +1947,7 @@ class TrainingPage(QWidget):
         else:
             try:
                 config = ExportConfig(
-                    model=self.model.text(),
+                    model=target_model,
                     format=fmt,
                     imgsz=int(self.export_imgsz.text()),
                     opset=int(self.export_opset.text()),
@@ -1952,6 +1970,9 @@ class TrainingPage(QWidget):
             output_dir = getattr(result, "save_dir", None)
             if output_dir:
                 self.status_changed.emit(f"训练完成，结果目录：{output_dir}")
+                best_pt = Path(output_dir) / "weights" / "best.pt"
+                if best_pt.exists():
+                    self.export_model_path.setText(str(best_pt))
             else:
                 self.status_changed.emit("训练完成")
         except TrainingStopped:
