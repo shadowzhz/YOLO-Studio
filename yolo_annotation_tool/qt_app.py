@@ -20,7 +20,7 @@ from .training import TrainingConfig, TrainingStopped, detect_training_device, t
 
 
 try:
-    from PySide6.QtCore import QPointF, QUrl, Qt, Signal
+    from PySide6.QtCore import QEvent, QObject, QPointF, QUrl, Qt, Signal
     from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygonF, QShortcut
     from PySide6.QtWidgets import (
         QApplication,
@@ -54,6 +54,18 @@ except ImportError as exc:  # pragma: no cover - depends on local desktop runtim
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+
+class PreventWheelSwitchFilter(QObject):
+    """全局滚轮事件过滤器：禁止未展开的下拉框因鼠标滚轮滚动而误切选项。"""
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Wheel and isinstance(obj, QComboBox):
+            view = obj.view()
+            if view is None or not view.isVisible():
+                event.ignore()
+                return True
+        return super().eventFilter(obj, event)
 
 
 class _TrainingLogStream:
@@ -633,10 +645,10 @@ class AnnotationPage(QWidget):
         self.class_combo = QComboBox()
         self.class_list = QListWidget()
         self.class_list.setObjectName("classList")
-        self.class_list.setMinimumHeight(110)
+        self.class_list.setMinimumHeight(70)
         self.annotation_list = QListWidget()
         self.annotation_list.setObjectName("currentAnnotationList")
-        self.annotation_list.setMinimumHeight(110)
+        self.annotation_list.setMinimumHeight(70)
         self.class_color_swatch = QFrame()
         self.class_color_swatch.setObjectName("classColorSwatch")
         self.class_color_swatch.setFixedSize(22, 22)
@@ -652,7 +664,7 @@ class AnnotationPage(QWidget):
         self.sam_output.addItem("SAM 输出多边形", "segment")
         self.image_list = QListWidget()
         self.image_list.setObjectName("imageList")
-        self.image_list.setMinimumHeight(180)
+        self.image_list.setMinimumHeight(100)
         self.image_status_filter = QComboBox()
         self.image_status_filter.addItem("全部状态", "all")
         self.image_status_filter.addItem("未标注", "unlabeled")
@@ -755,13 +767,13 @@ class AnnotationPage(QWidget):
         side_layout.addWidget(self.image_search)
         side_layout.addWidget(self.image_status_filter)
         side_layout.addWidget(list_header("状态", "图片名称"))
-        side_layout.addWidget(self.image_list)
+        side_layout.addWidget(self.image_list, 3)
         side_layout.addWidget(section("类别"))
         side_layout.addWidget(list_header("ID", "分类名"))
-        side_layout.addWidget(self.class_list)
+        side_layout.addWidget(self.class_list, 1)
         side_layout.addWidget(section("当前图片标注"))
         side_layout.addWidget(list_header("序号", "类别 / 形状"))
-        side_layout.addWidget(self.annotation_list)
+        side_layout.addWidget(self.annotation_list, 1)
         previous = QPushButton("上一张")
         previous.clicked.connect(self.previous_image)
         next_button = QPushButton("下一张")
@@ -804,13 +816,7 @@ class AnnotationPage(QWidget):
         ):
             settings_layout.addWidget(button)
         settings_layout.addStretch(1)
-        side_layout.addStretch(1)
-        side_scroll = QScrollArea()
-        side_scroll.setObjectName("sideScroll")
-        side_scroll.setWidgetResizable(True)
-        side_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        side_scroll.setWidget(side)
-        splitter.addWidget(side_scroll)
+        splitter.addWidget(side)
         self.canvas.setObjectName("canvasPanel")
         canvas_workspace = QWidget()
         canvas_workspace.setObjectName("canvasWorkspace")
@@ -2443,6 +2449,12 @@ class MainWindow(QMainWindow):
         self.about = AboutPage()
         self.settings_store = SettingsStore()
         self.settings.set_config_path(str(self.settings_store.path))
+
+        app = QApplication.instance()
+        if app is not None:
+            self._wheel_filter = PreventWheelSwitchFilter(self)
+            app.installEventFilter(self._wheel_filter)
+
         self.pages = QStackedWidget()
 
         def scroll_page(page: QWidget) -> QScrollArea:
@@ -2917,6 +2929,8 @@ def main() -> None:
         os.chdir(Path(sys.executable).resolve().parent)
     _relaunch_with_cuda_runtime()
     app = QApplication([])
+    wheel_filter = PreventWheelSwitchFilter(app)
+    app.installEventFilter(wheel_filter)
     font = QFont()
     font.setFamilies(["Segoe UI", "PingFang SC", "Microsoft YaHei UI", "WenQuanYi Micro Hei", "sans-serif"])
     font.setPointSize(9)
