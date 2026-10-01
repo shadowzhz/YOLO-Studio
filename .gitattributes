@@ -1,0 +1,18 @@
+# 统一跨平台换行符规则
+* text=auto
+
+# Linux Shell 脚本在任何系统检出时必须保持 LF 换行（防止 Windows 下 clone 变成 CRLF 导致报错）
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Windows 批处理保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不转换换行符
+*.pt binary
+*.pth binary
+*.onnx binary
+*.jpg binary
+*.png binary
+*.ico binary

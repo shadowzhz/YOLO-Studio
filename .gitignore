@@ -1,0 +1,27 @@
+# 字节码与缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# 训练与运行产物
+runs/
+wandb/
+*.log
+
+# 权重与大文件（建议不要直接推送到 GitHub）
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# 本地数据与标注临时文件
+datasets/
+images/
+labels/
+data/
+
+# 运行时配置与临时文件
+config/
+.DS_Store
+*.swp
