@@ -9,7 +9,7 @@ from pathlib import Path
 
 @dataclass
 class AppSettings:
-    theme: str = "跟随系统"
+    theme: str = "深色"
     show_guide_lines: bool = True
     zoom_step_percent: int = 25
     keep_zoom_on_image_switch: bool = False

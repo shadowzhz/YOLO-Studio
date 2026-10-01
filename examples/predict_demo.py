@@ -1,14 +1,16 @@
+from pathlib import Path
 from ultralytics import YOLO
 
+CURRENT_DIR = Path(__file__).resolve().parent
 model = YOLO("yolo11n.pt")
 
 # source 可以是单张图片、文件夹路径、或者图片 URL
 results = model.predict(
-    source="bus.jpg",
+    source=str(CURRENT_DIR / "bus.jpg"),
     save=True,                          # 自动保存画框后的图片
     conf=0.25,                          # 置信度阈值
-    device=0,                           # 指定 GPU 0
-    project="/workspace/runs",          # 保存到当前 D 盘目录
+    device=0,                           # 指定 GPU 0 (无 GPU 可改为 'cpu')
+    project=str(CURRENT_DIR / "runs"),  # 输出目录
     name="predict"                      # 文件夹名
 )
 

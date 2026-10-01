@@ -15,7 +15,7 @@ from .training import TrainingConfig, train
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("YOLO 标注工具")
+        self.title("YOLO Studio")
         self.geometry("720x420")
         self._events: queue.Queue[str] = queue.Queue()
         self.images = tk.StringVar()
@@ -79,7 +79,7 @@ class App(tk.Tk):
                 message = self._events.get_nowait()
                 self.status.set(message)
                 if message.startswith("错误："):
-                    messagebox.showerror("YOLO 标注工具", message[3:].strip())
+                    messagebox.showerror("YOLO Studio", message[3:].strip())
         except queue.Empty:
             pass
         self.after(100, self._drain_events)

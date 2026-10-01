@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title YOLO Annotation Tool (Docker for Windows)
+title YOLO Studio (Docker for Windows)
 
 echo ==================================================
-echo  启动 YOLO 标注与训练工具 (Docker for Windows)
+echo  启动 YOLO Studio (Docker for Windows)
 echo  工作目录: %cd%
 echo ==================================================
 
@@ -36,6 +36,7 @@ if "%MODE%"=="tk" (
         --gpus all ^
         -e DISPLAY=%DISPLAY% ^
         -v /tmp/.X11-unix:/tmp/.X11-unix:rw ^
+        -v //var/run/docker.sock:/var/run/docker.sock ^
         -v "%cd%":/workspace ^
         -w /workspace ^
         yolo-tool:latest ^
@@ -44,6 +45,7 @@ if "%MODE%"=="tk" (
     echo 正在进入容器 Bash 终端...
     docker run -it --rm ^
         --gpus all ^
+        -v //var/run/docker.sock:/var/run/docker.sock ^
         -v "%cd%":/workspace ^
         -w /workspace ^
         yolo-tool:latest ^
@@ -54,6 +56,7 @@ if "%MODE%"=="tk" (
         --gpus all ^
         -e DISPLAY=%DISPLAY% ^
         -v /tmp/.X11-unix:/tmp/.X11-unix:rw ^
+        -v //var/run/docker.sock:/var/run/docker.sock ^
         -v "%cd%":/workspace ^
         -w /workspace ^
         yolo-tool:latest ^

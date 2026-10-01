@@ -28,6 +28,6 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 PySide6 桌面 GUI 框架
-RUN pip install --no-cache-dir PySide6
+RUN pip install --no-cache-dir PySide6 onnx onnxsim
 
 WORKDIR /workspace
