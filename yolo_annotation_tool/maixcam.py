@@ -180,6 +180,7 @@ def collect_calibration_images(
     log_fn: Callable[[str], None] | None = None,
 ) -> list[Path]:
     """Gather sample images for INT8 calibration into a dedicated directory."""
+    shutil.rmtree(target_dir, ignore_errors=True)
     target_dir.mkdir(parents=True, exist_ok=True)
     image_suffixes = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     candidates: list[Path] = []
@@ -272,13 +273,28 @@ def generate_maixpy_script(
     """Generate an out-of-the-box runnable MaixPy test script."""
     cls_name = "YOLO11" if model_type == "yolo11" else "YOLOv8"
     script = f'''"""MaixCAM 目标检测快速验证脚本 (MaixPy v4)"""
-from maix import camera, display, image, nn
+from maix import app, camera, display, image, nn
+import os
 import time
 
 def main():
     # 1. 载入模型 (使用配套 .mud 统一描述文件)
-    print("正在加载模型: {mud_filename} ...")
-    detector = nn.{cls_name}(model="{mud_filename}", dual_buff=True)
+    candidates = ["{mud_filename}", "/root/models/{mud_filename}", "/root/{mud_filename}"]
+    model_path = next((p for p in candidates if os.path.exists(p)), None)
+    if not model_path:
+        raise FileNotFoundError(
+            "未在 MaixCAM 板端找到 {mud_filename}！\\n"
+            "请任选一种方式上传模型文件（{mud_filename} 和配套 .cvimodel）：\\n"
+            "  方式 1：在 MaixVision 左侧点击「打开文件夹」，打开导出目录（maixcam_best）作为工程运行（会自动同步目录下所有文件）；\\n"
+            "  方式 2：使用 MaixVision 左下角「文件管理器」将 {mud_filename} 和 .cvimodel 上传到板端 /root/models/ 目录。"
+        )
+    print(f"正在加载模型: {{model_path}} ...")
+    detector = nn.{cls_name}(model=model_path, dual_buff=True)
+    for font_path in ("/maixapp/share/font/SourceHanSansCN-Regular.otf", "/maixapp/share/font/Alibaba-PuHuiTi-Regular.otf"):
+        if os.path.exists(font_path):
+            image.load_font("cn", font_path, size=16)
+            image.set_default_font("cn")
+            break
 
     # 2. 初始化相机与屏幕
     cam = camera.Camera(detector.input_width(), detector.input_height(), detector.input_format())
@@ -289,23 +305,29 @@ def main():
     frames = 0
     fps = 0.0
 
-    while not disp.is_closed():
-        img = cam.read()
-        objs = detector.detect(img, conf_th=0.5, iou_th=0.45)
-        for obj in objs:
-            img.draw_rect(obj.x, obj.y, obj.w, obj.h, color=image.COLOR_RED, thickness=2)
-            label = detector.labels[obj.class_id] if obj.class_id < len(detector.labels) else str(obj.class_id)
-            msg = f"{{label}}: {{obj.score:.2f}}"
-            img.draw_string(obj.x, max(0, obj.y - 18), msg, color=image.COLOR_RED, scale=1.0)
-        
-        frames += 1
-        now = time.time()
-        if now - fps_last >= 1.0:
-            fps = frames / (now - fps_last)
-            frames = 0
-            fps_last = now
-        img.draw_string(10, 10, f"FPS: {{fps:.1f}}", color=image.COLOR_GREEN, scale=1.2)
-        disp.show(img)
+    try:
+        while not app.need_exit():
+            img = cam.read()
+            if img is None:
+                continue
+            # 置信度阈值：INT8 量化模型建议从 0.25 ~ 0.35 开始调试，避免 0.5 过滤过严
+            objs = detector.detect(img, conf_th=0.3, iou_th=0.45)
+            for obj in objs:
+                img.draw_rect(obj.x, obj.y, obj.w, obj.h, color=image.COLOR_RED, thickness=2)
+                label = detector.labels[obj.class_id] if obj.class_id < len(detector.labels) else str(obj.class_id)
+                msg = f"{{label}}: {{obj.score:.2f}}"
+                img.draw_string(obj.x, max(0, obj.y - 18), msg, color=image.COLOR_RED, scale=1.0)
+
+            frames += 1
+            now = time.time()
+            if now - fps_last >= 1.0:
+                fps = frames / (now - fps_last)
+                frames = 0
+                fps_last = now
+            img.draw_string(10, 10, f"FPS: {{fps:.1f}}", color=image.COLOR_GREEN, scale=1.2)
+            disp.show(img)
+    finally:
+        cam.close()
 
 if __name__ == "__main__":
     main()
@@ -327,16 +349,21 @@ def resolve_host_path(local_path: str | Path) -> str:
     path = Path(local_path).resolve()
     if not Path("/.dockerenv").exists():
         return str(path)
+    host_ws = os.environ.get("HOST_WORKSPACE")
+    if host_ws and path.is_relative_to("/workspace"):
+        return str(Path(host_ws).resolve() / path.relative_to("/workspace"))
     try:
         hostname = subprocess.run(["hostname"], capture_output=True, text=True, timeout=2).stdout.strip()
-        if not hostname:
-            return str(path)
-        cmd = ["docker", "inspect", "-f", "{{json .Mounts}}", hostname]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
-        if res.returncode == 0 and res.stdout.strip():
-            import json
-            mounts = json.loads(res.stdout)
-            for m in mounts:
+        cids = [hostname] if hostname else []
+        ps = subprocess.run(["docker", "ps", "-q"], capture_output=True, text=True, timeout=2)
+        if ps.returncode == 0:
+            cids.extend(c for c in ps.stdout.split() if c and c not in cids)
+        import json
+        for cid in cids:
+            res = subprocess.run(["docker", "inspect", "-f", "{{json .Mounts}}", cid], capture_output=True, text=True, timeout=4)
+            if res.returncode != 0 or not res.stdout.strip():
+                continue
+            for m in json.loads(res.stdout):
                 dest = Path(m.get("Destination", "")).resolve()
                 src = Path(m.get("Source", "")).resolve()
                 try:
@@ -417,8 +444,15 @@ def export_to_maixcam(config: MaixCamConfig) -> dict[str, Any]:
     calib_images: list[Path] = []
     quantize_mode = config.quantize.upper()
     if quantize_mode == "INT8":
+        calib_source: str | Path | None = config.calib_dataset
+        if not calib_source or not Path(calib_source).expanduser().exists():
+            for parent in Path(config.model_path).resolve().parents:
+                candidate_yaml = parent / "data.yaml"
+                if candidate_yaml.is_file():
+                    calib_source = candidate_yaml
+                    break
         calib_images = collect_calibration_images(
-            source=config.calib_dataset,
+            source=calib_source,
             target_dir=calib_dir,
             max_count=config.calib_num,
             log_fn=log,
@@ -436,17 +470,17 @@ def export_to_maixcam(config: MaixCamConfig) -> dict[str, Any]:
 
     # Compose internal container commands
     container_commands = [
-        "if ! command -v model_transform.py >/dev/null 2>&1; then echo '正在为容器安装 tpu_mlir (仅首次需要)...' && pip install --no-cache-dir tpu_mlir; fi",
+        "if ! command -v model_transform.py >/dev/null 2>&1; then echo \"正在为容器安装 tpu_mlir (仅首次需要)...\" && pip install --no-cache-dir tpu_mlir; fi",
         f"model_transform.py \\\n"
         f"    --model_name {model_name} \\\n"
         f"    --model_def /workspace/{clean_onnx_path.name} \\\n"
-        f"    --input_shapes '[[1,3,{h},{w}]]' \\\n"
-        f"    --mean '0,0,0' \\\n"
-        f"    --scale '0.00392156862745098,0.00392156862745098,0.00392156862745098' \\\n"
+        f"    --input_shapes \"[[1,3,{h},{w}]]\" \\\n"
+        f"    --mean \"0,0,0\" \\\n"
+        f"    --scale \"0.00392156862745098,0.00392156862745098,0.00392156862745098\" \\\n"
         f"    --keep_aspect_ratio \\\n"
         f"    --pixel_format rgb \\\n"
         f"    --channel_format nchw \\\n"
-        f"    --output_names '{output_names_str}' \\\n"
+        f"    --output_names \"{output_names_str}\" \\\n"
         f"    --mlir {model_name}.mlir"
     ]
 
@@ -561,6 +595,10 @@ pause
 部署步骤:
 1. 将本目录下的 `{mud_target.name}` 和 `{cvimodel_name}` 拷贝到 MaixCAM 设备（例如 /root/models/ 目录）。
 2. 在 MaixCAM 上运行同目录下的 `main.py` 即可查看摄像头实时检测效果。
+
+调试提示:
+- 若识别不到目标或漏检严重，请编辑 main.py 将 conf_th 调小（如 0.2 ~ 0.3）。
+- 若 INT8 量化精度受损明显，可在工具中将量化精度选为 BF16 重新导出测试。
 """
     readme_target.write_text(readme_content, encoding="utf-8")
 

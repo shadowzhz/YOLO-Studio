@@ -45,6 +45,11 @@ def detect_training_device() -> str:
 def train(config: TrainingConfig, stop_event: Event | None = None):
     """Train a detector/segmenter using the installed Ultralytics package."""
     try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+    except Exception:
+        pass
+    try:
         from ultralytics import YOLO
     except ImportError as exc:
         raise RuntimeError("Install ultralytics first: python -m pip install ultralytics") from exc
@@ -75,4 +80,14 @@ def train(config: TrainingConfig, stop_event: Event | None = None):
         "name": config.name,
     }
     kwargs.update(config.extra)
-    return model.train(**kwargs)
+    try:
+        return model.train(**kwargs)
+    finally:
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass

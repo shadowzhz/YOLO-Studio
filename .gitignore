@@ -23,6 +23,8 @@ wandb/
 datasets/
 images/
 labels/
+train/
+val/
 data/
 
 # 运行时配置与临时文件

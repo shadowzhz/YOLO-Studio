@@ -57,7 +57,7 @@ run_gui.bat
 
 ```mermaid
 graph LR
-    A[1. 交互与自动标注] --> B[2. 数据集质检与切分]
+    A[1. 交互标注与分割] --> B[2. 数据集质检与切分]
     B --> C[3. YOLO 模型训练]
     C --> D[4. 推理结果验证]
     C --> E[5. 模型转换与边缘部署]
@@ -67,10 +67,6 @@ graph LR
 
 ### 1. 标注与分割
 - **交互标注**：支持矩形框（Bbox）与多边形（Polygon）绘制，提供快捷键切换图片、缩放与十字辅助线。
-- **自动标注**：
-  - `detect` 模式：使用目标检测模型批量预标。
-  - `segment` 模式：使用 YOLO 定位候选框后调用 SAM 2 自动提取轮廓。
-  - 支持 `replace`（覆盖）、`skip`（跳过已有）、`append`（追加）、`smart_dedup`（IoU 智能去重）合并策略。
 
 ### 2. 数据集质检与划分
 - 自动扫描标注文件完整性，拦截越界坐标、空标签与异常行。
@@ -81,8 +77,7 @@ graph LR
 - 支持早停（Patience）、批次自适应、多线程数据加载以及随时中断训练。
 
 ### 4. 模型验证
-- 加载已训练权重，支持单张图片、文件夹图片或视频流推理验证，实时渲染检测框与多边形掩码。
-
+- 加载已训练权重，支持实时连接摄像头进行流式推理验证（实时叠加检测框与帧率计算），亦支持单张图片、文件夹图片或视频文件推理验证。
 ---
 
 ## MaixCAM 边缘部署转换指南
@@ -137,19 +132,16 @@ python3 main.py
 ### 1. 命令行接口 (CLI)
 
 ```bash
-# 1. 自动标注图片目录 (YOLO 检测)
-python3 -m yolo_annotation_tool auto-annotate /path/to/images /path/to/labels --detector yolo11n.pt --conf 0.3 --task detect
-
-# 2. 校验标注数据集
+# 1. 校验标注数据集
 python3 -m yolo_annotation_tool validate /path/to/dataset --classes 80
 
-# 3. 切分数据集为训练集与验证集并生成 data.yaml
+# 2. 切分数据集为训练集与验证集并生成 data.yaml
 python3 -m yolo_annotation_tool split /path/to/dataset person car dog --val-fraction 0.2
 
-# 4. 启动模型训练
+# 3. 启动模型训练
 python3 -m yolo_annotation_tool train --model yolo11n.pt --data data.yaml --epochs 100 --imgsz 640 --device 0
 
-# 5. 导出通用模型 (ONNX)
+# 4. 导出通用模型 (ONNX)
 python3 -m yolo_annotation_tool export --model best.pt --format onnx --imgsz 640
 ```
 
@@ -245,7 +237,7 @@ train(TrainingConfig(
 │   ├── qt_app.py               # PySide6 现代全功能桌面端
 │   ├── gui.py                  # Tkinter 轻量应急桌面端
 │   ├── annotations.py          # YOLO 检测框与多边形标注序列化模型
-│   ├── sam.py                  # YOLO + SAM 2 智能辅助标注引擎
+│   ├── sam.py                  # SAM 2 交互式分割标注引擎
 │   ├── dataset.py              # 数据集规范校验、坏标清洗与 Train/Val 划分
 │   ├── training.py             # Ultralytics 模型训练封装与中断控制
 │   ├── export.py               # 多格式模型导出调度器

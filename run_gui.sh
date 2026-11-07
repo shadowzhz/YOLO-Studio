@@ -40,6 +40,13 @@ if [ -S "/var/run/docker.sock" ] && command -v docker >/dev/null 2>&1; then
         -v "$(command -v docker):/usr/bin/docker:ro"
     )
 fi
+# 检测宿主机摄像头设备并透传至容器
+CAMERA_FLAGS=()
+for dev in /dev/video*; do
+    if [ -e "$dev" ]; then
+        CAMERA_FLAGS+=(--device "$dev:$dev")
+    fi
+done
 
 # 检测是否支持 NVIDIA GPU 容器运行
 GPU_FLAGS=()
@@ -68,9 +75,11 @@ if [ "$MODE" = "tk" ]; then
         -e LANG=C.UTF-8 \
         -e LC_ALL=C.UTF-8 \
         -e DISPLAY="$DISPLAY" \
+        -e HOST_WORKSPACE="$PROJECT_DIR" \
         -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
         "${FONT_MOUNT[@]}" \
         "${DOCKER_MOUNT[@]}" \
+        "${CAMERA_FLAGS[@]}" \
         -v "$PROJECT_DIR":/workspace \
         -w /workspace \
         yolo-tool:latest \
@@ -84,9 +93,11 @@ elif [ "$MODE" = "bash" ]; then
         -e LANG=C.UTF-8 \
         -e LC_ALL=C.UTF-8 \
         -e DISPLAY="$DISPLAY" \
+        -e HOST_WORKSPACE="$PROJECT_DIR" \
         -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
         "${FONT_MOUNT[@]}" \
         "${DOCKER_MOUNT[@]}" \
+        "${CAMERA_FLAGS[@]}" \
         -v "$PROJECT_DIR":/workspace \
         -w /workspace \
         yolo-tool:latest \
@@ -100,9 +111,11 @@ else
         -e LANG=C.UTF-8 \
         -e LC_ALL=C.UTF-8 \
         -e DISPLAY="$DISPLAY" \
+        -e HOST_WORKSPACE="$PROJECT_DIR" \
         -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
         "${FONT_MOUNT[@]}" \
         "${DOCKER_MOUNT[@]}" \
+        "${CAMERA_FLAGS[@]}" \
         -v "$PROJECT_DIR":/workspace \
         -w /workspace \
         yolo-tool:latest \

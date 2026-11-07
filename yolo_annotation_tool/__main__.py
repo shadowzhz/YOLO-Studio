@@ -4,7 +4,6 @@ import argparse
 import runpy
 
 from .dataset import make_dataset_yaml, split_annotated_dataset, validate_dataset
-from .sam import AutoAnnotator
 from .export import ExportConfig, export_model
 from .training import TrainingConfig, detect_training_device, train
 
@@ -12,17 +11,6 @@ from .training import TrainingConfig, detect_training_device, train
 def main() -> None:
     parser = argparse.ArgumentParser(prog="yolo-annotation-tool")
     sub = parser.add_subparsers(dest="command", required=True)
-
-    auto = sub.add_parser("auto-annotate", help="Generate YOLO labels with a detector/SAM")
-    auto.add_argument("images")
-    auto.add_argument("labels")
-    auto.add_argument("--detector", default="yolo11n.pt")
-    auto.add_argument("--segmenter", default="sam2_b.pt")
-    auto.add_argument("--conf", type=float, default=0.25)
-    auto.add_argument("--task", choices=("detect", "segment"), default="detect")
-    auto.add_argument("--merge", choices=("replace", "skip", "append", "smart_dedup", "append_new"), default="replace")
-    auto.add_argument("--merge-iou", type=float, default=0.45)
-    auto.add_argument("--classes", type=int, nargs="*", default=None)
 
     validate = sub.add_parser("validate", help="Validate a YOLO dataset")
     validate.add_argument("root")
@@ -63,18 +51,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "auto-annotate":
-        annotator = AutoAnnotator(args.detector, args.segmenter, args.conf)
-        count = annotator.annotate_folder(
-            args.images,
-            args.labels,
-            task=args.task,
-            merge=args.merge,
-            merge_iou=args.merge_iou,
-            class_ids=args.classes,
-        )
-        print(f"Generated {count} labels; stats={annotator.last_batch_stats}")
-    elif args.command == "validate":
+    if args.command == "validate":
         report = validate_dataset(args.root, args.classes)
         print(f"images={report.images} labels={report.labels} missing={len(report.missing_labels)} malformed={len(report.malformed_labels)} ok={report.ok}")
         if report.missing_labels:

@@ -50,6 +50,17 @@ def _image_files(path: Path) -> list[Path]:
     return sorted(p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in suffixes)
 
 
+def _source_images(root: Path) -> tuple[Path, list[Path]]:
+    images_dir = root / "images"
+    if images_dir.exists():
+        files = _image_files(images_dir)
+        if files:
+            return images_dir, files
+    excluded = {"images", "labels", "train", "val", "runs"}
+    files = [p for p in _image_files(root) if p.relative_to(root).parts[0] not in excluded]
+    return (root, files) if files else (images_dir, [])
+
+
 def _valid_label_line(line: str, class_count: int | None) -> bool:
     fields = line.split()
     is_detection = len(fields) == 5
@@ -68,13 +79,13 @@ def _valid_label_line(line: str, class_count: int | None) -> bool:
 
 def validate_dataset(root: str | Path, class_count: int | None = None) -> DatasetReport:
     root = Path(root)
-    images = _image_files(root / "images") if (root / "images").exists() else _image_files(root)
+    image_root, images = _source_images(root)
     labels_root = root / "labels"
     missing: list[str] = []
     malformed: list[str] = []
     labels = 0
     for image in images:
-        label = labels_root / image.relative_to(root / "images").with_suffix(".txt") if (root / "images").exists() else image.with_suffix(".txt")
+        label = labels_root / image.relative_to(image_root).with_suffix(".txt") if labels_root.exists() else image.with_suffix(".txt")
         if not label.exists():
             missing.append(str(image))
             continue
@@ -126,11 +137,11 @@ def split_annotated_dataset(
     if not 0 <= val_fraction < 1:
         raise DatasetError("验证集比例必须大于等于 0 且小于 1")
     root = prepare_project_structure(root)
-    image_root = root / "images"
+    image_root, images = _source_images(root)
     label_root = root / "labels"
     labeled: list[tuple[Path, Path, Path]] = []
     skipped: list[str] = []
-    for image in _image_files(image_root):
+    for image in images:
         relative = image.relative_to(image_root)
         label = label_root / relative.with_suffix(".txt")
         if not label.exists():
@@ -138,7 +149,7 @@ def split_annotated_dataset(
             continue
         labeled.append((image, label, relative))
     if not labeled:
-        raise DatasetError("没有找到已标注图片。请先在 images 中完成至少一张图片的标注。")
+        raise DatasetError("没有找到已标注图片。请先完成至少一张图片的标注。")
 
     random.Random(seed).shuffle(labeled)
     if len(labeled) < 2 or val_fraction == 0:
