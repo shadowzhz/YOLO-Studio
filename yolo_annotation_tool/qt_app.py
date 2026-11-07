@@ -866,9 +866,11 @@ class AnnotationPage(QWidget):
         self.status_stats_label = QLabel("图片总数: 0  已标注: 0  未标注: 0  负样本: 0")
         self.status_stats_label.setObjectName("statusStats")
         self.canvas = ImageCanvas()
-        self.canvas.changed.connect(lambda: self.status_changed.emit("有未保存的标注"))
+        self._dirty = False
+        self._state_cache = {}
+        self.canvas.changed.connect(self._mark_dirty)
         self.canvas.sam_point_added.connect(self._sam_point_clicked)
-        self.sam_result_ready.connect(self.canvas.apply_sam_result)
+        self.sam_result_ready.connect(self._apply_sam_result)
         self.sam_failed.connect(lambda message: self.status_changed.emit(f"SAM 失败：{message}"))
         self._sam_annotator: SamAnnotator | None = None
         self._sam_model_path = ""
@@ -1097,6 +1099,17 @@ class AnnotationPage(QWidget):
         self._update_canvas_status()
         self.refresh_annotation_list()
 
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+        self.status_changed.emit("有未保存的标注")
+
+    def _apply_sam_result(self, payload) -> None:
+        image, class_id, points, output = payload
+        if self.index < 0 or self.images[self.index] != image or self.canvas._class_id != class_id:
+            self.status_changed.emit("SAM 结果已过期，请在当前图片重新分割")
+            return
+        self.canvas.apply_sam_result((points, output))
+
     def open_folder(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "选择项目或图片目录", self.project_root.text())
         if not selected:
@@ -1115,6 +1128,7 @@ class AnnotationPage(QWidget):
         self.project_root.setText(str(root))
         self.index = -1
         self.images = images
+        self._state_cache.clear()
         self.visible_indices = list(range(len(self.images)))
         self.image_search.clear()
         self.apply_image_filter()
@@ -1143,10 +1157,14 @@ class AnnotationPage(QWidget):
             self.select_image(self.visible_indices[0])
 
     def _image_state(self, image: Path) -> str:
+        if image in self._state_cache:
+            return self._state_cache[image]
         label = self._label_path(image) if self.project_root.text().strip() else None
         if label is None or not label.exists():
             return "unlabeled"
-        return "labeled" if label.read_text(encoding="utf-8").strip() else "negative"
+        state = "labeled" if label.read_text(encoding="utf-8").strip() else "negative"
+        self._state_cache[image] = state
+        return state
 
     def _image_list_text(self, image: Path) -> str:
         labels = {"unlabeled": "未标注", "labeled": "已标注", "negative": "负样本"}
@@ -1328,6 +1346,10 @@ class AnnotationPage(QWidget):
             return
         if not 0 <= index < len(names):
             return
+        root = Path(self.project_root.text())
+        if any((root / "labels").rglob("*.txt")) or self.canvas.annotations:
+            QMessageBox.warning(self, "类别管理", "已有标签时不能删除类别，以免改变标签编号。")
+            return
         del names[index]
         self.class_names.setText(",".join(names))
         self.save_classes()
@@ -1396,14 +1418,17 @@ class AnnotationPage(QWidget):
         self.image_list.blockSignals(False)
         image = self.images[index]
         self.canvas.set_image(image, load_annotations(self._label_path(image)))
+        self._dirty = False
         self.refresh_annotation_list()
         self._update_canvas_status()
         self.status_changed.emit(f"第 {index + 1}/{len(self.images)} 张：{image.name}")
 
     def save_current(self) -> None:
-        if self.index < 0:
+        if self.index < 0 or not self._dirty:
             return
         save_annotations(self._label_path(self.images[self.index]), self.canvas.annotations)
+        self._dirty = False
+        self._state_cache.pop(self.images[self.index], None)
         self.update_stats()
         self.status_changed.emit("标注已保存")
 
@@ -1412,13 +1437,9 @@ class AnnotationPage(QWidget):
         labeled = 0
         negative = 0
         for image in self.images:
-            label = self._label_path(image)
-            if not label.exists():
-                continue
-            if label.read_text(encoding="utf-8").strip():
-                labeled += 1
-            else:
-                negative += 1
+            state = self._image_state(image)
+            labeled += state == "labeled"
+            negative += state == "negative"
         unlabeled = max(0, total - labeled - negative)
         self.status_stats_label.setText(f"图片总数: {total}  已标注: {labeled}  未标注: {unlabeled}  负样本: {negative}")
         self.stats_changed.emit(total, labeled, unlabeled, negative)
@@ -1443,6 +1464,8 @@ class AnnotationPage(QWidget):
         path = self._label_path(self.images[self.index])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("", encoding="utf-8")
+        self._dirty = False
+        self._state_cache.pop(self.images[self.index], None)
         self.update_stats()
         self.status_changed.emit("当前图片已设置为负样本")
 
@@ -1457,6 +1480,8 @@ class AnnotationPage(QWidget):
             QMessageBox.information(self, "负样本", "当前图片有实际标注，不能按负样本取消。")
             return
         path.unlink()
+        self._dirty = False
+        self._state_cache.pop(self.images[self.index], None)
         self.update_stats()
         self.status_changed.emit("已取消当前图片的负样本标记")
 
@@ -1576,6 +1601,8 @@ class AnnotationPage(QWidget):
             self.run_sam()
 
     def run_sam(self) -> None:
+        if self._sam_busy:
+            return
         if self.index < 0:
             QMessageBox.warning(self, "SAM 点选", "请先打开图片并点选目标。")
             return
@@ -1592,9 +1619,9 @@ class AnnotationPage(QWidget):
         output = self.sam_output.currentData()
         self._sam_busy = True
         self.status_changed.emit("正在运行 SAM 分割")
-        threading.Thread(target=self._sam_work, args=(image, points, labels, model, output), daemon=True).start()
+        threading.Thread(target=self._sam_work, args=(image, points, labels, model, output, self.canvas._class_id), daemon=True).start()
 
-    def _sam_work(self, image: Path, points: list[tuple[float, float]], labels: list[int], model: str, output: str) -> None:
+    def _sam_work(self, image: Path, points: list[tuple[float, float]], labels: list[int], model: str, output: str, class_id: int) -> None:
         try:
             from PIL import Image
 
@@ -1611,7 +1638,7 @@ class AnnotationPage(QWidget):
             normalized = tuple((float(x) / width, float(y) / height) for x, y in polygon)
             if len(normalized) < 3:
                 raise RuntimeError("掩膜轮廓点不足")
-            self.sam_result_ready.emit((normalized, output))
+            self.sam_result_ready.emit((image, class_id, normalized, output))
             result_name = "矩形框" if output == "detect" else "多边形"
             self.status_changed.emit(f"SAM 完成，已生成{result_name}")
         except Exception as exc:
@@ -2287,7 +2314,8 @@ class ValidationPage(QWidget):
             first_output = None
             for image_path in sources:
                 result = model.predict(str(image_path), conf=confidence, verbose=False)[0]
-                output = output_dir / image_path.name
+                output = output_dir / (image_path.relative_to(source) if kind == "folder" else image_path.name)
+                output.parent.mkdir(parents=True, exist_ok=True)
                 result.save(filename=str(output))
                 first_output = first_output or output
             if first_output:
@@ -3111,6 +3139,12 @@ class MainWindow(QMainWindow):
             )
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        try:
+            self.annotation.save_current()
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            event.ignore()
+            return
         self.validation.stop()
         self._save_settings()
         event.accept()

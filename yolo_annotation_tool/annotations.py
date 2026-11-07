@@ -85,4 +85,6 @@ def save_annotations(path: str | Path, annotations: list[Annotation]) -> None:
         else:
             values = " ".join(f"{value:.6f}" for point in item.points for value in point)
             rows.append(f"{item.class_id} {values}")
-    path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+    temporary = path.with_suffix(".txt.tmp")
+    temporary.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+    temporary.replace(path)

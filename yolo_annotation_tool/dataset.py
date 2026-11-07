@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import random
 import shutil
+import tempfile
 from typing import Iterable, Sequence
 
 
@@ -159,20 +160,36 @@ def split_annotated_dataset(
     val_items = labeled[:val_count]
     train_items = labeled[val_count:]
 
-    for split_name, items in (("train", train_items), ("val", val_items)):
-        split_images = root / split_name / "images"
-        split_labels = root / split_name / "labels"
-        shutil.rmtree(split_images, ignore_errors=True)
-        shutil.rmtree(split_labels, ignore_errors=True)
-        split_images.mkdir(parents=True, exist_ok=True)
-        split_labels.mkdir(parents=True, exist_ok=True)
-        for image, label, relative in items:
-            destination_image = split_images / relative
-            destination_label = split_labels / relative.with_suffix(".txt")
-            destination_image.parent.mkdir(parents=True, exist_ok=True)
-            destination_label.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(image, destination_image)
-            shutil.copy2(label, destination_label)
+    with tempfile.TemporaryDirectory(prefix=".split-", dir=root) as temp:
+        staging = Path(temp)
+        for split_name, items in (("train", train_items), ("val", val_items)):
+            split_images = staging / split_name / "images"
+            split_labels = staging / split_name / "labels"
+            split_images.mkdir(parents=True, exist_ok=True)
+            split_labels.mkdir(parents=True, exist_ok=True)
+            for image, label, relative in items:
+                destination_image = split_images / relative
+                destination_label = split_labels / relative.with_suffix(".txt")
+                destination_image.parent.mkdir(parents=True, exist_ok=True)
+                destination_label.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(image, destination_image)
+                shutil.copy2(label, destination_label)
+
+        moved = []
+        try:
+            for split_name in ("train", "val"):
+                for kind in ("images", "labels"):
+                    target = root / split_name / kind
+                    backup = staging / (split_name + "_" + kind + "_backup")
+                    target.rename(backup)
+                    moved.append((target, backup))
+                    (staging / split_name / kind).rename(target)
+        except OSError:
+            for target, backup in reversed(moved):
+                if target.exists():
+                    shutil.rmtree(target)
+                backup.rename(target)
+            raise
 
     yaml_path = make_dataset_yaml(root, names)
     return DatasetSplitReport(len(labeled), len(train_items), len(val_items), tuple(skipped), yaml_path)
