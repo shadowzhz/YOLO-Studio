@@ -8,6 +8,7 @@ import random
 import re
 import shutil
 import tempfile
+import yaml
 from typing import Iterable, Sequence
 
 
@@ -109,7 +110,8 @@ def write_detection_labels(path: str | Path, boxes: Iterable[Sequence[float]], c
         if not all(0 <= value <= 1 for value in values):
             raise DatasetError("YOLO box values must be normalized to [0, 1]")
         rows.append(f"{int(cls)} " + " ".join(f"{value:.6f}" for value in values))
-    path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+    from .annotations import Detection, save_annotations
+    save_annotations(path, [Detection(int(row.split()[0]), *(float(v) for v in row.split()[1:])) for row in rows])
 
 def remove_unused_class(root: Path, names: Sequence[str], index: int) -> None:
     """Remove an unused class and keep all project label IDs consistent."""
@@ -138,11 +140,12 @@ def remove_unused_class(root: Path, names: Sequence[str], index: int) -> None:
     yaml_path = root / "data.yaml"
     if yaml_path.exists():
         text = yaml_path.read_text(encoding="utf-8")
-        old = f"nc: {len(names)}\nnames:\n" + "".join(f"  {i}: {name}\n" for i, name in enumerate(names))
-        if not text.endswith(old):
-            raise DatasetError("data.yaml 的类别与当前列表不一致或格式不是软件生成的格式，无法安全删除类别。")
-        new = f"nc: {len(remaining)}\nnames:\n" + "".join(f"  {i}: {name}\n" for i, name in enumerate(remaining))
-        changes[yaml_path] = (text[:-len(old)] + new).encode("utf-8")
+        data = yaml.safe_load(text)
+        expected = {i: name for i, name in enumerate(names)}
+        if not isinstance(data, dict) or data.get("names") not in (expected, list(names)):
+            raise DatasetError("data.yaml 类别与当前列表不一致")
+        data.update(nc=len(remaining), names=dict(enumerate(remaining)))
+        changes[yaml_path] = yaml.safe_dump(data, allow_unicode=True, sort_keys=False).encode("utf-8")
     changes[root / "classes.txt"] = ("\n".join(remaining) + "\n").encode("utf-8")
 
     backup = Path(tempfile.mkdtemp(prefix=".class-backup-", dir=root))
@@ -178,9 +181,8 @@ def make_dataset_yaml(root: str | Path, names: Sequence[str], output: str | Path
     root = prepare_project_structure(root).resolve()
     target = Path(output) if output else root / "data.yaml"
     target.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"path: {root.as_posix()}", "train: train/images", "val: val/images", f"nc: {len(names)}", "names:"]
-    lines.extend(f"  {i}: {name}" for i, name in enumerate(names))
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    data = dict(path=root.as_posix(), train="train/images", val="val/images", nc=len(names), names=dict(enumerate(names)))
+    target.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return target
 
 
@@ -190,6 +192,7 @@ def split_annotated_dataset(
     *,
     val_fraction: float = 0.2,
     seed: int = 42,
+    stop_event=None,
 ) -> DatasetSplitReport:
     """Copy labeled images and labels into the standard train/val folders.
 
@@ -205,11 +208,15 @@ def split_annotated_dataset(
     labeled: list[tuple[Path, Path, Path]] = []
     skipped: list[str] = []
     for image in images:
+        if stop_event is not None and stop_event.is_set():
+            raise DatasetError("数据集划分已取消")
         relative = image.relative_to(image_root)
         label = label_root / relative.with_suffix(".txt")
         if not label.exists():
             skipped.append(relative.as_posix())
             continue
+        if any(not _valid_label_line(line, len(names)) for line in label.read_text(encoding="utf-8").splitlines() if line.strip()):
+            raise DatasetError(f"标注格式或类别有误：{label}")
         labeled.append((image, label, relative))
     if not labeled:
         raise DatasetError("没有找到已标注图片。请先完成至少一张图片的标注。")
@@ -230,6 +237,8 @@ def split_annotated_dataset(
             split_images.mkdir(parents=True, exist_ok=True)
             split_labels.mkdir(parents=True, exist_ok=True)
             for image, label, relative in items:
+                if stop_event is not None and stop_event.is_set():
+                    raise DatasetError("数据集划分已取消")
                 destination_image = split_images / relative
                 destination_label = split_labels / relative.with_suffix(".txt")
                 destination_image.parent.mkdir(parents=True, exist_ok=True)
@@ -237,6 +246,8 @@ def split_annotated_dataset(
                 shutil.copy2(image, destination_image)
                 shutil.copy2(label, destination_label)
 
+        if stop_event is not None and stop_event.is_set():
+            raise DatasetError("数据集划分已取消")
         moved = []
         try:
             for split_name in ("train", "val"):

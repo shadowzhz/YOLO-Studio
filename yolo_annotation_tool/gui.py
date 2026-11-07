@@ -5,7 +5,6 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .training import TrainingConfig, train

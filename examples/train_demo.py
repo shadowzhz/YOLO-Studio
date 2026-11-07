@@ -1,4 +1,3 @@
-from pathlib import Path
 from ultralytics import YOLO
 
 # 1. 载入预训练权重

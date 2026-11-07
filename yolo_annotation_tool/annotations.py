@@ -26,19 +26,7 @@ Annotation: TypeAlias = Detection | Polygon
 
 
 def load_detections(path: str | Path) -> list[Detection]:
-    path = Path(path)
-    if not path.exists():
-        return []
-    annotations: list[Detection] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        fields = line.split()
-        if len(fields) != 5:
-            continue
-        try:
-            annotations.append(Detection(int(fields[0]), *(float(value) for value in fields[1:])))
-        except ValueError:
-            continue
-    return annotations
+    return [item for item in load_annotations(path) if isinstance(item, Detection)]
 
 
 def load_annotations(path: str | Path) -> list[Annotation]:
@@ -65,13 +53,7 @@ def load_annotations(path: str | Path) -> list[Annotation]:
 
 
 def save_detections(path: str | Path, annotations: list[Detection]) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = "\n".join(
-        f"{item.class_id} {item.x_center:.6f} {item.y_center:.6f} {item.width:.6f} {item.height:.6f}"
-        for item in annotations
-    )
-    path.write_text(content + ("\n" if content else ""), encoding="utf-8")
+    save_annotations(path, annotations)
 
 
 def save_annotations(path: str | Path, annotations: list[Annotation]) -> None:

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 from typing import Any, Callable, Sequence
 
 
@@ -223,15 +222,6 @@ def collect_calibration_images(
                 if log_fn:
                     log_fn(f"[校准集] 读取 YAML 遇到异常：{exc}")
 
-    # Fallback search if still empty
-    if not candidates:
-        cwd = Path.cwd()
-        for p in sorted(cwd.rglob("*")):
-            if p.is_file() and p.suffix.lower() in image_suffixes and ("calib" in p.parts or "val" in p.parts or "images" in p.parts):
-                candidates.append(p)
-                if len(candidates) >= max_count:
-                    break
-
     selected: list[Path] = []
     for i, img_path in enumerate(candidates[:max_count]):
         dst = target_dir / f"calib_{i:04d}{img_path.suffix.lower()}"
@@ -445,7 +435,9 @@ def export_to_maixcam(config: MaixCamConfig) -> dict[str, Any]:
     quantize_mode = config.quantize.upper()
     if quantize_mode == "INT8":
         calib_source: str | Path | None = config.calib_dataset
-        if not calib_source or not Path(calib_source).expanduser().exists():
+        if calib_source and not Path(calib_source).expanduser().exists():
+            raise ValueError(f"指定的校准来源不存在：{calib_source}")
+        if not calib_source:
             for parent in Path(config.model_path).resolve().parents:
                 candidate_yaml = parent / "data.yaml"
                 if candidate_yaml.is_file():

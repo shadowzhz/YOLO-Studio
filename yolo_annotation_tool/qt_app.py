@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import sys
 from .tasks import TASKS
+from .charts import TrainingChart
 import threading
 from threading import Event
 
@@ -22,8 +23,8 @@ from .training import TrainingConfig, TrainingStopped, detect_training_device, t
 
 
 try:
-    from PySide6.QtCore import QEvent, QLibraryInfo, QObject, QPointF, QRectF, QTimer, QTranslator, QUrl, Qt, Signal
-    from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygonF, QShortcut
+    from PySide6.QtCore import QEvent, QLibraryInfo, QObject, QPointF, QTimer, QTranslator, QUrl, Qt, Signal
+    from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygonF, QShortcut
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -45,7 +46,6 @@ try:
         QMainWindow,
         QMessageBox,
         QPushButton,
-        QProgressBar,
         QListWidgetItem,
         QScrollArea,
         QSlider,
@@ -208,6 +208,8 @@ class ImageCanvas(QLabel):
         self.update()
 
     def set_image(self, image_path: Path, annotations: list[Annotation]) -> None:
+        self._polygon_draft.clear()
+        self._pan_start = None
         self._image = QPixmap(str(image_path))
         self._annotations = annotations
         self._start = None
@@ -244,15 +246,6 @@ class ImageCanvas(QLabel):
         self.selection_changed.emit(self._selected_index if self._selected_index is not None else -1)
         self.update()
 
-    def append_annotations(self, annotations: list[Annotation]) -> None:
-        if not annotations:
-            return
-        self._record_change()
-        self._annotations.extend(annotations)
-        self.select_annotation(len(self._annotations) - 1)
-        self.changed.emit()
-        self.update()
-
     def nudge_selected(self, dx: float, dy: float) -> bool:
         item = self.selected_annotation
         if item is None:
@@ -279,11 +272,6 @@ class ImageCanvas(QLabel):
     @property
     def sam_labels(self) -> list[int]:
         return list(self._sam_labels)
-
-    def clear_sam_points(self) -> None:
-        self._sam_points.clear()
-        self._sam_labels.clear()
-        self.update()
 
     def undo_sam_point(self) -> bool:
         if not self._sam_points:
@@ -314,10 +302,6 @@ class ImageCanvas(QLabel):
         self.changed.emit()
         self.update()
 
-    def apply_sam_polygon(self, points: object) -> None:
-        """Compatibility wrapper for callers that only return a polygon."""
-        self.apply_sam_result((points, "segment"))
-
     def clear_annotations(self) -> None:
         if not self._annotations and not self._polygon_draft:
             return
@@ -327,12 +311,6 @@ class ImageCanvas(QLabel):
         self.select_annotation(-1)
         self.changed.emit()
         self.update()
-
-    def zoom_in(self) -> None:
-        self._set_zoom(self._zoom * (1 + self._zoom_step_percent / 100))
-
-    def zoom_out(self) -> None:
-        self._set_zoom(self._zoom / (1 + self._zoom_step_percent / 100))
 
     def reset_view(self) -> None:
         self._zoom = 1.0
@@ -946,12 +924,11 @@ class CaptureDialog(QDialog):
 
 class AnnotationPage(QWidget):
     status_changed = Signal(str)
-    classes_changed = Signal(object)
     dataset_ready = Signal(str)
+    split_finished = Signal()
     stats_changed = Signal(int, int, int, int)
     sam_result_ready = Signal(object)
     sam_failed = Signal(str)
-    sam_finished = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -999,6 +976,7 @@ class AnnotationPage(QWidget):
         self.canvas = ImageCanvas()
         self._dirty = False
         self._state_cache = {}
+        self._stop_event = Event()
         self.canvas.changed.connect(self._mark_dirty)
         self.canvas.sam_point_added.connect(self._sam_point_clicked)
         self.sam_result_ready.connect(self._apply_sam_result)
@@ -1006,6 +984,10 @@ class AnnotationPage(QWidget):
         self._sam_annotator: SamAnnotator | None = None
         self._sam_model_path = ""
         self._build()
+        self.split_finished.connect(lambda: self.setEnabled(True))
+        self._sam_timer = QTimer(self)
+        self._sam_timer.timeout.connect(self._run_pending_sam)
+        self._sam_timer.start(50)
         self.canvas.changed.connect(self._update_canvas_status)
         self.canvas.changed.connect(self.refresh_annotation_list)
         self.refresh_classes()
@@ -1225,6 +1207,8 @@ class AnnotationPage(QWidget):
         self._next_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._next_shortcut.activated.connect(self.next_image)
         self._sam_busy = False
+        self._sam_pending = False
+        self._sam_request = 0
         self._update_canvas_status()
         self.refresh_annotation_list()
 
@@ -1233,7 +1217,9 @@ class AnnotationPage(QWidget):
         self.status_changed.emit("有未保存的标注")
 
     def _apply_sam_result(self, payload) -> None:
-        image, class_id, points, output = payload
+        request, image, class_id, points, output = payload
+        if request != self._sam_request or self._sam_pending:
+            return
         if self.index < 0 or self.images[self.index] != image or self.canvas._class_id != class_id:
             self.status_changed.emit("SAM 结果已过期，请在当前图片重新分割")
             return
@@ -1308,6 +1294,7 @@ class AnnotationPage(QWidget):
             return self._state_cache[image]
         label = self._label_path(image) if self.project_root.text().strip() else None
         if label is None or not label.exists():
+            self._state_cache[image] = "unlabeled"
             return "unlabeled"
         state = "labeled" if label.read_text(encoding="utf-8").strip() else "negative"
         self._state_cache[image] = state
@@ -1418,11 +1405,12 @@ class AnnotationPage(QWidget):
         self.class_list.blockSignals(False)
         self._set_current_class(0)
         self.refresh_annotation_list()
-        self.classes_changed.emit(names)
 
     def _set_current_class(self, class_id: int) -> None:
         if class_id < 0:
             return
+        if self.canvas._class_id != class_id:
+            self._sam_request += 1
         self.canvas.set_class_id(class_id)
         color = self.canvas._class_color(class_id)
         self.class_color_swatch.setStyleSheet(f"background-color: {color}; border: 1px solid rgba(0, 0, 0, 0.22); border-radius: 4px;")
@@ -1435,6 +1423,8 @@ class AnnotationPage(QWidget):
         self._update_canvas_status()
 
     def _set_mode(self, mode: str) -> None:
+        self._sam_request += 1
+        self._sam_pending = False
         self.canvas.set_mode(mode)
         if hasattr(self, "sam_panel"):
             self.sam_panel.setVisible(mode == "sam")
@@ -1498,6 +1488,15 @@ class AnnotationPage(QWidget):
         self.refresh_classes()
 
     def save_classes(self) -> None:
+        path = self.class_file_path()
+        proposed = self.current_class_names()
+        if path and path.exists():
+            previous = path.read_text(encoding="utf-8").splitlines()
+            if proposed[:len(previous)] != previous:
+                self.class_names.setText(",".join(previous))
+                self.status_changed.emit("已有类别不能直接删除、改名或调序；删除请使用删除类别按钮")
+                self.refresh_classes()
+                return
         self.refresh_classes()
         path = self.class_file_path()
         names = self.current_class_names()
@@ -1524,6 +1523,9 @@ class AnnotationPage(QWidget):
         self.class_combo.setCurrentIndex(len(names) - 1)
 
     def remove_current_class(self) -> None:
+        if TASKS.busy:
+            self.status_changed.emit("请等待后台任务结束后再删除类别")
+            return
         names = self.current_class_names()
         index = self.class_combo.currentIndex()
         if len(names) <= 1:
@@ -1571,14 +1573,22 @@ class AnnotationPage(QWidget):
         if not names:
             QMessageBox.warning(self, "划分数据集", "请至少保留一个类别。")
             return
-        try:
-            report = split_annotated_dataset(root, names, val_fraction=float(self.split_ratio.currentData()))
-        except DatasetError as exc:
-            QMessageBox.warning(self, "划分数据集", str(exc))
+        if TASKS.busy:
+            self.status_changed.emit("请等待后台任务结束后再划分数据集")
             return
-        self.dataset_ready.emit(str(report.yaml_path))
-        skipped = f"，跳过未标注 {len(report.skipped_unlabeled)} 张" if report.skipped_unlabeled else ""
-        self.status_changed.emit(f"数据集已划分：训练 {report.train_images} 张，验证 {report.val_images} 张{skipped}")
+        self._stop_event.clear()
+        self.setEnabled(False)
+        TASKS.submit(self, self._split_work, (root, names, float(self.split_ratio.currentData())), on_cancel=self.split_finished.emit)
+
+    def _split_work(self, root, names, ratio):
+        try:
+            report = split_annotated_dataset(root, names, val_fraction=ratio, stop_event=self._stop_event)
+            self.dataset_ready.emit(str(report.yaml_path))
+            self.status_changed.emit(f"划分完成：训练 {report.train_images}，验证 {report.val_images}")
+        except Exception as exc:
+            self.status_changed.emit(f"划分失败：{exc}")
+        finally:
+            self.split_finished.emit()
 
     def _label_path(self, image: Path) -> Path:
         root = Path(self.project_root.text())
@@ -1591,6 +1601,8 @@ class AnnotationPage(QWidget):
             return
         if self.index >= 0:
             self.save_current()
+        self._sam_request += 1
+        self._sam_pending = False
         self.index = index
         self.image_list.blockSignals(True)
         if index in self.visible_indices:
@@ -1608,11 +1620,25 @@ class AnnotationPage(QWidget):
             return
         save_annotations(self._label_path(self.images[self.index]), self.canvas.annotations)
         self._dirty = False
-        self._state_cache.pop(self.images[self.index], None)
-        self.update_stats()
+        self.update_stats(self.images[self.index])
         self.status_changed.emit("标注已保存")
 
-    def update_stats(self) -> None:
+    def update_stats(self, changed_image=None) -> None:
+        if changed_image is not None and hasattr(self, "_counts"):
+            old = self._state_cache.pop(changed_image, "unlabeled")
+            new = self._image_state(changed_image)
+            self._counts[old] -= 1
+            self._counts[new] += 1
+            total = len(self.images)
+            labeled, negative = self._counts["labeled"], self._counts["negative"]
+            self.status_stats_label.setText(f"图片总数: {total}  已标注: {labeled}  未标注: {self._counts['unlabeled']}  负样本: {negative}")
+            self.stats_changed.emit(total, labeled, self._counts["unlabeled"], negative)
+            if self.index in self.visible_indices:
+                item = self.image_list.item(self.visible_indices.index(self.index))
+                if item:
+                    item.setText(self._image_list_text(changed_image))
+                    self._style_image_item(item, changed_image)
+            return
         total = len(self.images)
         labeled = 0
         negative = 0
@@ -1621,6 +1647,7 @@ class AnnotationPage(QWidget):
             labeled += state == "labeled"
             negative += state == "negative"
         unlabeled = max(0, total - labeled - negative)
+        self._counts = dict(labeled=labeled, negative=negative, unlabeled=unlabeled)
         self.status_stats_label.setText(f"图片总数: {total}  已标注: {labeled}  未标注: {unlabeled}  负样本: {negative}")
         # Reserve enough room for any count in this dataset, so changes in
         # the number of digits do not shift the neighbouring controls.
@@ -1653,12 +1680,14 @@ class AnnotationPage(QWidget):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("", encoding="utf-8")
         self._dirty = False
-        self._state_cache.pop(self.images[self.index], None)
-        self.update_stats()
+        self.update_stats(self.images[self.index])
         self.status_changed.emit("当前图片已设置为负样本")
 
     def unset_negative(self) -> None:
         if self.index < 0:
+            return
+        if self._dirty or self.canvas.annotations:
+            self.status_changed.emit("当前画布有标注或未保存修改，请先保存后再操作")
             return
         path = self._label_path(self.images[self.index])
         if not path.exists():
@@ -1669,125 +1698,27 @@ class AnnotationPage(QWidget):
             return
         path.unlink()
         self._dirty = False
-        self._state_cache.pop(self.images[self.index], None)
-        self.update_stats()
+        self.update_stats(self.images[self.index])
         self.status_changed.emit("已取消当前图片的负样本标记")
 
-    @staticmethod
-    def _shape_bounds(item: Annotation) -> tuple[float, float, float, float]:
-        if isinstance(item, Detection):
-            return (item.x_center - item.width / 2, item.y_center - item.height / 2, item.x_center + item.width / 2, item.y_center + item.height / 2)
-        xs = [point[0] for point in item.points]
-        ys = [point[1] for point in item.points]
-        return min(xs), min(ys), max(xs), max(ys)
-
-    def lock_match_template(self) -> None:
-        if self.index < 0:
-            QMessageBox.warning(self, "标注匹配", "请先打开图片。")
-            return
-        item = self.canvas.selected_annotation
-        if item is None:
-            QMessageBox.warning(self, "标注匹配", "请先在矩形模式下点击一个已有标注。")
-            return
-        self._match_template = (self.images[self.index], self._shape_bounds(item), item.class_id)
-        self.status_changed.emit(f"已锁定匹配模板：{self.images[self.index].name}")
-
-    def run_match_current(self) -> None:
-        if self in TASKS._jobs:
-            self.status_changed.emit("请等待当前页面任务结束")
-            return
-        if self._match_template is None:
-            QMessageBox.warning(self, "标注匹配", "请先锁定一个已有标注作为模板。")
-            return
-        if self.index < 0:
-            return
-        if self._match_busy:
-            self.status_changed.emit("标注匹配仍在进行中")
-            return
-        try:
-            confidence = float(self.match_conf.text())
-            if not 0 <= confidence <= 1:
-                raise ValueError
-        except ValueError:
-            QMessageBox.warning(self, "标注匹配", "匹配阈值必须是 0 到 1 之间的数字。")
-            return
-        template_image, bounds, class_id = self._match_template
-        self._match_busy = True
-        self._match_run_button.setEnabled(False)
-        self.status_changed.emit("正在匹配当前图片")
-        TASKS.submit(self,
-            target=self._match_work,
-            args=(template_image, self.images[self.index], bounds, class_id, confidence),
-            on_cancel=self.match_finished.emit,
-        )
-
-    def _match_work(self, template_image: Path, target_image: Path, bounds: tuple[float, float, float, float], class_id: int, confidence: float) -> None:
-        try:
-            import cv2
-            import numpy as np
-
-            source = cv2.imread(str(template_image), cv2.IMREAD_COLOR)
-            target = cv2.imread(str(target_image), cv2.IMREAD_COLOR)
-            if source is None or target is None:
-                raise RuntimeError("无法读取模板或目标图片")
-            source_height, source_width = source.shape[:2]
-            target_height, target_width = target.shape[:2]
-            x1 = max(0, min(source_width - 1, int(bounds[0] * source_width)))
-            y1 = max(0, min(source_height - 1, int(bounds[1] * source_height)))
-            x2 = max(x1 + 1, min(source_width, int(bounds[2] * source_width)))
-            y2 = max(y1 + 1, min(source_height, int(bounds[3] * source_height)))
-            template = source[y1:y2, x1:x2]
-            template_height, template_width = template.shape[:2]
-            if template_width >= target_width or template_height >= target_height:
-                raise RuntimeError("模板尺寸大于当前图片")
-            scores = cv2.matchTemplate(target, template, cv2.TM_CCOEFF_NORMED)
-            ys, xs = np.where(np.isfinite(scores) & (scores >= confidence))
-            candidates = sorted(((float(scores[y, x]), int(x), int(y)) for y, x in zip(ys, xs)), reverse=True)
-            accepted: list[tuple[float, int, int]] = []
-            for score, x, y in candidates:
-                box = (x, y, x + template_width, y + template_height)
-                if any(self._pixel_iou(box, (ox, oy, ox + template_width, oy + template_height)) >= 0.30 for _, ox, oy in accepted):
-                    continue
-                accepted.append((score, x, y))
-                if len(accepted) >= 100:
-                    break
-            detections = [Detection(class_id, (x + template_width / 2) / target_width, (y + template_height / 2) / target_height, template_width / target_width, template_height / target_height) for _, x, y in accepted]
-            self.match_result_ready.emit((target_image, detections, len(accepted)))
-        except Exception as exc:
-            self.match_failed.emit(str(exc))
-        finally:
-            self.match_finished.emit()
-
-    @staticmethod
-    def _pixel_iou(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> float:
-        x1, y1 = max(first[0], second[0]), max(first[1], second[1])
-        x2, y2 = min(first[2], second[2]), min(first[3], second[3])
-        intersection = max(0, x2 - x1) * max(0, y2 - y1)
-        area_first = max(0, first[2] - first[0]) * max(0, first[3] - first[1])
-        area_second = max(0, second[2] - second[0]) * max(0, second[3] - second[1])
-        union = area_first + area_second - intersection
-        return intersection / union if union else 0.0
-
-    def _apply_match_result(self, payload: object) -> None:
-        image, detections, count = payload  # type: ignore[misc]
-        if self.index >= 0 and self.images[self.index] == image:
-            self.canvas.append_annotations(detections)
-        self.status_changed.emit(f"标注匹配完成，找到 {count} 个相似目标")
-
-    def _match_done(self) -> None:
-        self._match_busy = False
-        self._match_run_button.setEnabled(True)
-
+    def _run_pending_sam(self):
+        if self._sam_pending and not self._sam_busy and self not in TASKS._jobs:
+            self._sam_pending = False
+            if self.canvas.sam_points:
+                self.run_sam()
 
     def _sam_point_clicked(self, _x: float, _y: float, label: int) -> None:
         point_type = "正点" if label == 1 else "负点"
         self.status_changed.emit(f"已添加 SAM {point_type}，正在运行 SAM 分割")
-        if not self._sam_busy:
+        self._sam_request += 1
+        if self._sam_busy:
+            self._sam_pending = True
+        else:
             self.run_sam()
 
     def _cancel_sam(self) -> None:
         self._sam_busy = False
-        self.sam_finished.emit()
+        pass
 
     def run_sam(self) -> None:
         if self in TASKS._jobs:
@@ -1809,11 +1740,12 @@ class AnnotationPage(QWidget):
             return
         image = self.images[self.index]
         output = self.sam_output.currentData()
+        self._sam_pending = False
         self._sam_busy = True
         self.status_changed.emit("正在运行 SAM 分割")
-        TASKS.submit(self, self._sam_work, (image, points, labels, model, output, self.canvas._class_id), on_cancel=self._cancel_sam)
+        TASKS.submit(self, self._sam_work, (image, points, labels, model, output, self.canvas._class_id, self._sam_request), on_cancel=self._cancel_sam)
 
-    def _sam_work(self, image: Path, points: list[tuple[float, float]], labels: list[int], model: str, output: str, class_id: int) -> None:
+    def _sam_work(self, image: Path, points: list[tuple[float, float]], labels: list[int], model: str, output: str, class_id: int, request: int) -> None:
         try:
             from PIL import Image
 
@@ -1838,7 +1770,7 @@ class AnnotationPage(QWidget):
                 ignored, missed = 0, False
             if len(normalized) < 3:
                 raise RuntimeError("掩膜轮廓点不足")
-            self.sam_result_ready.emit((image, class_id, normalized, output))
+            self.sam_result_ready.emit((request, image, class_id, normalized, output))
             result_name = "矩形框" if output == "detect" else "多边形"
             message = f"SAM 完成，已生成{result_name}"
             if ignored:
@@ -1850,102 +1782,11 @@ class AnnotationPage(QWidget):
             self.sam_failed.emit(str(exc))
         finally:
             self._sam_busy = False
-            self.sam_finished.emit()
 
     @staticmethod
     def _polygon_area(points: object) -> float:
         values = [(float(x), float(y)) for x, y in points]  # type: ignore[misc]
         return abs(sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(values, values[1:] + values[:1]))) / 2
-
-
-class TrainingChart(QWidget):
-    """Small, dependency-free chart for per-epoch training metrics."""
-
-    def __init__(self, title: str, series: tuple[tuple[str, str, str], ...], fixed_max=None) -> None:
-        super().__init__()
-        self.title = title
-        self.series = series
-        self.fixed_max = fixed_max
-        self.points: list[dict] = []
-        self.setMinimumHeight(155)
-        self.setMouseTracking(True)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-    def clear(self) -> None:
-        self.points.clear()
-        self.update()
-
-    def add_point(self, point: dict) -> None:
-        self.points.append(point)
-        self.update()
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if not self.points or not 55 <= event.position().x() <= self.width() - 15:
-            self.setToolTip("")
-            return
-        epochs = [int(point["epoch"]) for point in self.points]
-        low, high = min(epochs), max(epochs)
-        epoch = low + (event.position().x() - 55) / max(1, self.width() - 70) * (high - low)
-        point = min(self.points, key=lambda item: abs(int(item["epoch"]) - epoch))
-        lines = [f"轮次 {point['epoch']}"]
-        lines.extend(f"{label}: {float(point[key]):.6g}" for key, label, _ in self.series if point.get(key) is not None)
-        self.setToolTip("\n".join(lines))
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        text = self.palette().color(QPalette.ColorRole.WindowText)
-        muted = QColor(text)
-        muted.setAlpha(145)
-        grid = QColor(text)
-        grid.setAlpha(40)
-        painter.setPen(text)
-        painter.drawText(10, 20, self.title)
-        legend_x = 10
-        for key, label, color in self.series:
-            if not any(point.get(key) is not None for point in self.points):
-                continue
-            painter.setPen(QPen(QColor(color), 3))
-            painter.drawLine(legend_x, 36, legend_x + 14, 36)
-            painter.setPen(muted)
-            painter.drawText(legend_x + 19, 40, label)
-            legend_x += painter.fontMetrics().horizontalAdvance(label) + 38
-        area = QRectF(55, 49, max(1, self.width() - 70), max(1, self.height() - 78))
-        values = [float(p[key]) for p in self.points for key, _, _ in self.series if p.get(key) is not None]
-        upper = self.fixed_max if self.fixed_max is not None else max(values, default=0) * 1.1
-        upper = max(float(upper), 0.001)
-        for i in range(5):
-            y = area.bottom() - area.height() * i / 4
-            painter.setPen(QPen(grid, 1))
-            painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y))
-            painter.setPen(muted)
-            painter.drawText(QRectF(0, y - 8, 49, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{upper * i / 4:.3g}")
-        if not values:
-            painter.setPen(muted)
-            painter.drawText(area, Qt.AlignmentFlag.AlignCenter, "等待首轮训练和验证完成")
-            return
-        epochs = [int(point["epoch"]) for point in self.points]
-        low, high = min(epochs), max(epochs)
-        for key, _, color in self.series:
-            painter.setPen(QPen(QColor(color), 2))
-            previous = None
-            for point in self.points:
-                value = point.get(key)
-                if value is None:
-                    previous = None
-                    continue
-                x = area.center().x() if high == low else area.left() + (int(point["epoch"]) - low) / (high - low) * area.width()
-                y = area.bottom() - min(1.0, max(0.0, float(value) / upper)) * area.height()
-                current = QPointF(x, y)
-                if previous is not None:
-                    painter.drawLine(previous, current)
-                painter.drawEllipse(current, 2.5, 2.5)
-                previous = current
-        painter.setPen(muted)
-        ticks = sorted({round(low + (high - low) * i / 4) for i in range(5)})
-        for epoch in ticks:
-            x = area.center().x() if high == low else area.left() + (epoch - low) / (high - low) * area.width()
-            painter.drawText(QRectF(x - 25, area.bottom() + 5, 50, 18), Qt.AlignmentFlag.AlignCenter, str(epoch))
 
 
 class TrainingPage(QWidget):
@@ -2641,11 +2482,16 @@ class ValidationPage(QWidget):
             self.status_changed.emit(f"摄像头 {cam_source} 已连接，开始实时推理")
             fps_time = time.time()
             fps_count = 0
+            failures = 0
             while not self._stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret or frame is None:
-                    time.sleep(0.01)
+                    failures += 1
+                    if failures >= 30:
+                        raise RuntimeError("摄像头连续读取失败，请重新连接")
+                    self._stop_event.wait(0.05)
                     continue
+                failures = 0
 
                 with self._confidence_lock:
                     confidence = self._confidence_value
@@ -2678,6 +2524,10 @@ class ValidationPage(QWidget):
             from ultralytics import YOLO
 
             model = YOLO(model_path)
+            source = source.resolve()
+            output_dir = output_dir.resolve()
+            if (kind == "folder" and output_dir == source) or (kind != "folder" and output_dir == source.parent):
+                raise ValueError("输出目录不能与输入目录相同，以免覆盖源文件")
             output_dir.mkdir(parents=True, exist_ok=True)
             if kind == "video":
                 for _ in model.predict(str(source), conf=confidence, save=True, stream=True, project=str(output_dir.parent), name=output_dir.name, exist_ok=True, verbose=False):
@@ -2686,7 +2536,7 @@ class ValidationPage(QWidget):
                         return
                 self.status_changed.emit(f"视频推理完成，结果目录：{output_dir}")
                 return
-            sources = [source] if kind == "image" else sorted(path for path in source.rglob("*") if path.suffix.lower() in IMAGE_SUFFIXES)
+            sources = [source] if kind == "image" else sorted(path for path in source.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES and not path.resolve().is_relative_to(output_dir))
             first_output = None
             for image_path in sources:
                 if self._stop_event.is_set():
