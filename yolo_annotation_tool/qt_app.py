@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sys
+from .tasks import TASKS
 import threading
 from threading import Event
 
@@ -1505,6 +1506,9 @@ class AnnotationPage(QWidget):
         self.status_changed.emit(f"已锁定匹配模板：{self.images[self.index].name}")
 
     def run_match_current(self) -> None:
+        if self in TASKS._jobs:
+            self.status_changed.emit("请等待当前页面任务结束")
+            return
         if self._match_template is None:
             QMessageBox.warning(self, "标注匹配", "请先锁定一个已有标注作为模板。")
             return
@@ -1524,11 +1528,11 @@ class AnnotationPage(QWidget):
         self._match_busy = True
         self._match_run_button.setEnabled(False)
         self.status_changed.emit("正在匹配当前图片")
-        threading.Thread(
+        TASKS.submit(self,
             target=self._match_work,
             args=(template_image, self.images[self.index], bounds, class_id, confidence),
-            daemon=True,
-        ).start()
+            on_cancel=self.match_finished.emit,
+        )
 
     def _match_work(self, template_image: Path, target_image: Path, bounds: tuple[float, float, float, float], class_id: int, confidence: float) -> None:
         try:
@@ -1600,7 +1604,14 @@ class AnnotationPage(QWidget):
         if not self._sam_busy:
             self.run_sam()
 
+    def _cancel_sam(self) -> None:
+        self._sam_busy = False
+        self.sam_finished.emit()
+
     def run_sam(self) -> None:
+        if self in TASKS._jobs:
+            self.status_changed.emit("请等待当前页面任务结束")
+            return
         if self._sam_busy:
             return
         if self.index < 0:
@@ -1619,7 +1630,7 @@ class AnnotationPage(QWidget):
         output = self.sam_output.currentData()
         self._sam_busy = True
         self.status_changed.emit("正在运行 SAM 分割")
-        threading.Thread(target=self._sam_work, args=(image, points, labels, model, output, self.canvas._class_id), daemon=True).start()
+        TASKS.submit(self, self._sam_work, (image, points, labels, model, output, self.canvas._class_id), on_cancel=self._cancel_sam)
 
     def _sam_work(self, image: Path, points: list[tuple[float, float]], labels: list[int], model: str, output: str, class_id: int) -> None:
         try:
@@ -1900,6 +1911,8 @@ class TrainingPage(QWidget):
             self.project.setText(str(yaml_path.resolve().parent / "runs" / "train"))
 
     def run(self) -> None:
+        if self in TASKS._jobs:
+            return
         try:
             config = TrainingConfig(
                 model=self.model.text(),
@@ -1921,16 +1934,19 @@ class TrainingPage(QWidget):
         self._stop_event.clear()
         self.log.clear()
         self.status_changed.emit("正在训练模型")
-        threading.Thread(target=self._work, args=(config,), daemon=True).start()
+        TASKS.submit(self, self._work, (config,), on_cancel=self.job_finished.emit)
 
     def stop_training(self) -> None:
         if not self.stop.isEnabled():
             return
         self.stop.setEnabled(False)
         self.status_changed.emit("正在停止训练，请等待当前批次结束")
-        self._stop_event.set()
+        TASKS.cancel(self)
 
     def run_export(self) -> None:
+        if self in TASKS._jobs:
+            self.status_changed.emit("请等待当前页面任务结束")
+            return
         target_model = self.export_model_path.text().strip() or self.model.text().strip()
         if not target_model:
             QMessageBox.warning(self, "模型导出", "请先指定待转换的模型权重路径（例如 best.pt）。")
@@ -1963,7 +1979,7 @@ class TrainingPage(QWidget):
                 return
         self.export_button.setEnabled(False)
         self.status_changed.emit("正在导出模型")
-        threading.Thread(target=self._export_work, args=(config,), daemon=True).start()
+        TASKS.submit(self, self._export_work, (config,), on_cancel=self.export_finished.emit)
 
     def _work(self, config: TrainingConfig) -> None:
         stream = _TrainingLogStream(self.status_changed.emit)
@@ -2235,7 +2251,7 @@ class ValidationPage(QWidget):
             self._set_inputs_enabled(False)
             self.run_button.setText("停止实时推理")
             self.status_changed.emit("正在启动实时摄像头推理...")
-            threading.Thread(target=self._camera_work, args=(str(model_path), cam_source, confidence), daemon=True).start()
+            TASKS.submit(self, self._camera_work, (str(model_path), cam_source, confidence), on_cancel=self.job_finished.emit)
         else:
             source = Path(self.image.text().strip())
             source_ok = source.is_dir() if kind == "folder" else source.is_file()
@@ -2246,11 +2262,14 @@ class ValidationPage(QWidget):
             self.run_button.setEnabled(False)
             self._set_inputs_enabled(False)
             self.status_changed.emit("正在执行模型推理")
-            threading.Thread(
+            self._stop_event.clear()
+            self.run_button.setEnabled(True)
+            self.run_button.setText("取消推理")
+            TASKS.submit(self,
                 target=self._work,
                 args=(str(model_path), source, kind, confidence, Path(self.output_dir.text())),
-                daemon=True,
-            ).start()
+                on_cancel=self.job_finished.emit,
+            )
 
     def _camera_work(self, model_path: str, cam_source: int | str, confidence: float) -> None:
         cap = None
@@ -2307,12 +2326,18 @@ class ValidationPage(QWidget):
             model = YOLO(model_path)
             output_dir.mkdir(parents=True, exist_ok=True)
             if kind == "video":
-                model.predict(str(source), conf=confidence, save=True, project=str(output_dir.parent), name=output_dir.name, exist_ok=True, verbose=False)
+                for _ in model.predict(str(source), conf=confidence, save=True, stream=True, project=str(output_dir.parent), name=output_dir.name, exist_ok=True, verbose=False):
+                    if self._stop_event.is_set():
+                        self.status_changed.emit("视频推理已取消")
+                        return
                 self.status_changed.emit(f"视频推理完成，结果目录：{output_dir}")
                 return
             sources = [source] if kind == "image" else sorted(path for path in source.rglob("*") if path.suffix.lower() in IMAGE_SUFFIXES)
             first_output = None
             for image_path in sources:
+                if self._stop_event.is_set():
+                    self.status_changed.emit("推理已取消")
+                    return
                 result = model.predict(str(image_path), conf=confidence, verbose=False)[0]
                 output = output_dir / (image_path.relative_to(source) if kind == "folder" else image_path.name)
                 output.parent.mkdir(parents=True, exist_ok=True)
@@ -2366,7 +2391,7 @@ class ValidationPage(QWidget):
 
     def stop(self) -> None:
         if self._is_running:
-            self._stop_event.set()
+            TASKS.cancel(self)
 
 class SettingsPage(QWidget):
     theme_changed = Signal(str)
@@ -3145,6 +3170,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "保存失败", str(exc))
             event.ignore()
             return
+        if TASKS.busy:
+            TASKS.cancel(self.training)
+            TASKS.cancel(self.validation)
+            TASKS.cancel(self.annotation)
+            QMessageBox.information(self, "正在结束任务", "已请求取消。请等待后台任务结束后再次关闭；模型加载和导出需等待当前调用完成。")
+            event.ignore()
+            return
+        TASKS.shutdown()
         self.validation.stop()
         self._save_settings()
         event.accept()
