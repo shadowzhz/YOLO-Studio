@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 import sys
 from threading import Event
-from typing import Any
+from typing import Any, Callable
+import math
 
 
 _APP_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd()
@@ -42,7 +43,7 @@ def detect_training_device() -> str:
     return "0" if torch.cuda.is_available() else "cpu"
 
 
-def train(config: TrainingConfig, stop_event: Event | None = None):
+def train(config: TrainingConfig, stop_event: Event | None = None, metrics_callback: Callable[[dict], None] | None = None):
     """Train a detector/segmenter using the installed Ultralytics package."""
     try:
         import matplotlib
@@ -68,6 +69,21 @@ def train(config: TrainingConfig, stop_event: Event | None = None):
                 raise TrainingStopped("训练已停止")
 
         model.add_callback("on_train_batch_end", stop_if_requested)
+    if metrics_callback is not None:
+        last_training_epoch = None
+
+        def remember_epoch(trainer) -> None:
+            nonlocal last_training_epoch
+            last_training_epoch = trainer.epoch
+
+        def report_epoch(trainer) -> None:
+            # Ultralytics also fires this callback for final best-weight
+            # validation, after incrementing epoch without training another one.
+            if trainer.epoch == last_training_epoch:
+                metrics_callback(epoch_metrics(trainer))
+
+        model.add_callback("on_train_epoch_end", remember_epoch)
+        model.add_callback("on_fit_epoch_end", report_epoch)
     kwargs = {
         "data": config.data,
         "epochs": config.epochs,
@@ -91,3 +107,24 @@ def train(config: TrainingConfig, stop_event: Event | None = None):
                 torch.cuda.empty_cache()
         except Exception:
             pass
+
+
+def epoch_metrics(trainer) -> dict:
+    """Extract validated mAP50 and the sum of training loss components."""
+    def finite(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    metrics = getattr(trainer, "metrics", None) or {}
+    losses = trainer.label_loss_items(getattr(trainer, "tloss", None))
+    values = [finite(value) for key, value in losses.items() if key.startswith("train/")]
+    values = [value for value in values if value is not None]
+    return {
+        "epoch": int(trainer.epoch) + 1,
+        "map50_box": finite(metrics.get("metrics/mAP50(B)")),
+        "map50_mask": finite(metrics.get("metrics/mAP50(M)")),
+        "train_loss": sum(values) if values else None,
+    }

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import random
+import re
 import shutil
 import tempfile
 from typing import Iterable, Sequence
@@ -109,6 +110,67 @@ def write_detection_labels(path: str | Path, boxes: Iterable[Sequence[float]], c
             raise DatasetError("YOLO box values must be normalized to [0, 1]")
         rows.append(f"{int(cls)} " + " ".join(f"{value:.6f}" for value in values))
     path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+
+def remove_unused_class(root: Path, names: Sequence[str], index: int) -> None:
+    """Remove an unused class and keep all project label IDs consistent."""
+    changes: dict[Path, bytes] = {}
+    for directory in (root / "labels", root / "train" / "labels", root / "val" / "labels"):
+        for path in directory.rglob("*.txt"):
+            text = path.read_text(encoding="utf-8")
+            rows = []
+            for line in text.splitlines(keepends=True):
+                fields = line.split()
+                if not fields:
+                    rows.append(line)
+                    continue
+                if not _valid_label_line(line, len(names)):
+                    raise DatasetError(f"标注格式有误，无法安全删除类别：{path}")
+                class_id = int(fields[0])
+                if class_id == index:
+                    raise DatasetError(f"类别“{names[index]}”仍被标注使用：{path}")
+                rows.append(re.sub(r"^(\s*)\S+", lambda match: match.group(1) + str(class_id - 1), line, count=1) if class_id > index else line)
+            updated = "".join(rows)
+            if updated != text:
+                changes[path] = updated.encode("utf-8")
+
+    remaining = list(names)
+    del remaining[index]
+    yaml_path = root / "data.yaml"
+    if yaml_path.exists():
+        text = yaml_path.read_text(encoding="utf-8")
+        old = f"nc: {len(names)}\nnames:\n" + "".join(f"  {i}: {name}\n" for i, name in enumerate(names))
+        if not text.endswith(old):
+            raise DatasetError("data.yaml 的类别与当前列表不一致或格式不是软件生成的格式，无法安全删除类别。")
+        new = f"nc: {len(remaining)}\nnames:\n" + "".join(f"  {i}: {name}\n" for i, name in enumerate(remaining))
+        changes[yaml_path] = (text[:-len(old)] + new).encode("utf-8")
+    changes[root / "classes.txt"] = ("\n".join(remaining) + "\n").encode("utf-8")
+
+    backup = Path(tempfile.mkdtemp(prefix=".class-backup-", dir=root))
+    (backup / "files.txt").write_text("".join(f"{number}.original: {path.relative_to(root)}\n" for number, path in enumerate(changes)), encoding="utf-8")
+    replaced: list[tuple[Path, Path | None]] = []
+    try:
+        for number, (path, content) in enumerate(changes.items()):
+            original = backup / f"{number}.original"
+            if path.exists():
+                shutil.copy2(path, original)
+            else:
+                original = None
+            staged = backup / f"{number}.new"
+            staged.write_bytes(content)
+            staged.replace(path)
+            replaced.append((path, original))
+    except OSError as exc:
+        try:
+            for path, original in reversed(replaced):
+                if original is None:
+                    path.unlink()
+                else:
+                    shutil.copy2(original, path)
+        except OSError as rollback_error:
+            raise DatasetError(f"保存失败且恢复未完成，原文件备份位于 {backup}：{rollback_error}") from exc
+        shutil.rmtree(backup, ignore_errors=True)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
 
 
 def make_dataset_yaml(root: str | Path, names: Sequence[str], output: str | Path | None = None) -> Path:

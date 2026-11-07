@@ -13,24 +13,29 @@ import threading
 from threading import Event
 
 from .annotations import Annotation, Detection, Polygon, load_annotations, save_annotations
-from .dataset import DatasetError, _source_images, make_dataset_yaml, prepare_project_structure, split_annotated_dataset
+from .capture import CameraCapture, save_frame
+from .dataset import DatasetError, _source_images, prepare_project_structure, remove_unused_class, split_annotated_dataset
 from .export import ExportConfig, export_model
-from .sam import SamAnnotator
+from .sam import SamAnnotator, main_mask_contour
 from .settings import AppSettings, SettingsStore
 from .training import TrainingConfig, TrainingStopped, detect_training_device, train
 
 
 try:
-    from PySide6.QtCore import QEvent, QObject, QPointF, QUrl, Qt, Signal
+    from PySide6.QtCore import QEvent, QLibraryInfo, QObject, QPointF, QRectF, QTimer, QTranslator, QUrl, Qt, Signal
     from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygonF, QShortcut
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
         QComboBox,
+        QDialog,
+        QDoubleSpinBox,
+        QSpinBox,
         QFileDialog,
         QFormLayout,
         QFrame,
         QGroupBox,
+        QGridLayout,
         QHBoxLayout,
         QInputDialog,
         QKeySequenceEdit,
@@ -43,6 +48,7 @@ try:
         QProgressBar,
         QListWidgetItem,
         QScrollArea,
+        QSlider,
         QSplitter,
         QStackedWidget,
         QTextEdit,
@@ -56,6 +62,20 @@ except ImportError as exc:  # pragma: no cover - depends on local desktop runtim
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+
+class _FileDialogTranslator(QTranslator):
+    """Fill gaps in the Qt Chinese catalog for the file chooser."""
+
+    _strings = {
+        "&Look in:": "查找范围(&L)：",
+        "Files of &type:": "文件类型(&T)：",
+    }
+
+    def translate(self, context, sourceText, disambiguation=None, n=-1):  # noqa: N802
+        if context == "QFileDialog" and sourceText in self._strings:
+            return self._strings[sourceText]
+        return super().translate(context, sourceText, disambiguation, n)
 
 
 class PreventWheelSwitchFilter(QObject):
@@ -129,7 +149,6 @@ class ImageCanvas(QLabel):
         self._sam_points: list[tuple[float, float]] = []
         self._sam_labels: list[int] = []
         self._zoom = 1.0
-        self._grid_enabled = False
         self._show_guide_lines = True
         self._guide_position: tuple[float, float] | None = None
         self._zoom_step_percent = 25
@@ -322,9 +341,6 @@ class ImageCanvas(QLabel):
         self.view_changed.emit(self._zoom)
         self.update()
 
-    def toggle_grid(self) -> None:
-        self._grid_enabled = not self._grid_enabled
-        self.update()
 
     def _set_zoom(self, zoom: float) -> None:
         self._zoom = max(0.2, min(zoom, 8.0))
@@ -369,17 +385,6 @@ class ImageCanvas(QLabel):
         self.changed.emit()
         self.update()
 
-    def set_selected_class(self, class_id: int) -> bool:
-        if self._selected_index is None:
-            return False
-        item = self._annotations[self._selected_index]
-        if item.class_id == class_id:
-            return True
-        self._record_change()
-        self._annotations[self._selected_index] = replace(item, class_id=class_id)
-        self.changed.emit()
-        self.update()
-        return True
 
     def _draw_rect(self):
         if self._image.isNull():
@@ -442,13 +447,6 @@ class ImageCanvas(QLabel):
             return
         left, top, width, height, _ = area
         painter.drawPixmap(int(left), int(top), int(width), int(height), self._image)
-        if self._grid_enabled:
-            painter.setPen(QPen(QColor(255, 255, 255, 55), 1, Qt.PenStyle.DotLine))
-            for step in range(1, 10):
-                x = int(left + width * step / 10)
-                y = int(top + height * step / 10)
-                painter.drawLine(x, int(top), x, int(top + height))
-                painter.drawLine(int(left), y, int(left + width), y)
         for index, item in enumerate(self._annotations):
             color = "#f0883e" if index == self._selected_index else self._class_color(item.class_id)
             painter.setPen(QPen(QColor(color), self._annotation_line_width + (1 if index == self._selected_index else 0)))
@@ -814,6 +812,138 @@ class ImageCanvas(QLabel):
         return inside
 
 
+class CaptureDialog(QDialog):
+    """Preview and save camera frames into the current annotation project."""
+
+    def __init__(self, image_dir: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.image_dir = image_dir
+        self.camera = None
+        self.saved_count = 0
+        self.setWindowTitle("摄像头图片采集")
+        self.resize(760, 560)
+        layout = QVBoxLayout(self)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("摄像头编号"))
+        self.device = QSpinBox()
+        self.device.setRange(0, 99)
+        controls.addWidget(self.device)
+        self.connect_button = QPushButton("连接摄像头")
+        self.connect_button.clicked.connect(self.toggle_camera)
+        controls.addWidget(self.connect_button)
+        controls.addStretch()
+        controls.addWidget(QLabel("采集间隔（秒）"))
+        self.interval = QDoubleSpinBox()
+        self.interval.setRange(0.2, 3600)
+        self.interval.setDecimals(1)
+        self.interval.setValue(2.0)
+        controls.addWidget(self.interval)
+        layout.addLayout(controls)
+        self.preview = QLabel("连接摄像头后显示实时画面")
+        self.preview.setObjectName("previewPanel")
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setMinimumSize(400, 300)
+        layout.addWidget(self.preview, 1)
+        self.info = QLabel(f"保存位置：{image_dir} | 已采集 0 张")
+        self.info.setWordWrap(True)
+        layout.addWidget(self.info)
+        buttons = QHBoxLayout()
+        self.capture_button = QPushButton("采集一张")
+        self.capture_button.clicked.connect(self.capture_frame)
+        self.capture_button.setEnabled(False)
+        buttons.addWidget(self.capture_button)
+        self.auto_button = QPushButton("开始连续采集")
+        self.auto_button.clicked.connect(self.toggle_auto)
+        self.auto_button.setEnabled(False)
+        buttons.addWidget(self.auto_button)
+        buttons.addStretch()
+        close = QPushButton("完成")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setInterval(50)
+        self.preview_timer.timeout.connect(self.update_preview)
+        self.capture_timer = QTimer(self)
+        self.capture_timer.timeout.connect(self.capture_frame)
+        self.interval.valueChanged.connect(self._update_interval)
+
+    def toggle_camera(self) -> None:
+        if self.camera is not None:
+            self.stop_camera()
+            return
+        self.camera = CameraCapture(self.device.value())
+        self.camera.start()
+        self.device.setEnabled(False)
+        self.connect_button.setText("断开摄像头")
+        self.preview_timer.start()
+
+    def update_preview(self) -> None:
+        if self.camera is None:
+            return
+        frame, status = self.camera.snapshot()
+        if frame is None:
+            self.preview.setText(status)
+            self.capture_button.setEnabled(False)
+            self.auto_button.setEnabled(False)
+            if status.startswith("采集失败"):
+                self.capture_timer.stop()
+                self.auto_button.setText("开始连续采集")
+            return
+        import cv2
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width, channels = rgb.shape
+        image = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format.Format_RGB888).copy()
+        self.preview.setPixmap(QPixmap.fromImage(image).scaled(
+            self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.capture_button.setEnabled(True)
+        self.auto_button.setEnabled(True)
+
+    def capture_frame(self) -> None:
+        frame, _ = self.camera.snapshot() if self.camera else (None, "")
+        if frame is None:
+            return
+        try:
+            path = save_frame(frame, self.image_dir)
+        except Exception as exc:
+            self.capture_timer.stop()
+            self.auto_button.setText("开始连续采集")
+            QMessageBox.warning(self, "采集失败", str(exc))
+            return
+        self.saved_count += 1
+        self.info.setText(f"保存位置：{self.image_dir} | 已采集 {self.saved_count} 张 | 最新：{path.name}")
+
+    def _update_interval(self) -> None:
+        if self.capture_timer.isActive():
+            self.capture_timer.start(round(self.interval.value() * 1000))
+
+    def toggle_auto(self) -> None:
+        if self.capture_timer.isActive():
+            self.capture_timer.stop()
+            self.auto_button.setText("开始连续采集")
+        else:
+            self.capture_timer.start(round(self.interval.value() * 1000))
+            self.auto_button.setText("停止连续采集")
+
+    def stop_camera(self) -> None:
+        self.capture_timer.stop()
+        self.preview_timer.stop()
+        if self.camera is not None:
+            self.camera.stop()
+            self.camera = None
+        self.device.setEnabled(True)
+        self.connect_button.setText("连接摄像头")
+        self.capture_button.setEnabled(False)
+        self.auto_button.setEnabled(False)
+        self.auto_button.setText("开始连续采集")
+        self.preview.clear()
+        self.preview.setText("连接摄像头后显示实时画面")
+
+    def done(self, result: int) -> None:
+        self.stop_camera()
+        super().done(result)
+
+
 class AnnotationPage(QWidget):
     status_changed = Signal(str)
     classes_changed = Signal(object)
@@ -902,35 +1032,32 @@ class AnnotationPage(QWidget):
         choose.setToolTip("第一步：选择包含待标注图片或已有标注的项目文件夹")
         choose.clicked.connect(self.open_folder)
         project.addWidget(choose)
+        capture = QPushButton("实时采集")
+        capture.setToolTip("从摄像头采集图片到当前项目")
+        capture.clicked.connect(self.capture_images)
+        project.addWidget(capture)
         project.addWidget(self.status_stats_label)
         lbl_split = QLabel("划分导出:")
         lbl_split.setStyleSheet("color: #94a3b8; font-size: 11px;")
         project.addWidget(lbl_split)
         self.split_ratio.setToolTip("设置训练集与验证集的切分比例（推荐 20% 验证）")
         project.addWidget(self.split_ratio)
-        split_dataset = QPushButton("划分训练/验证")
-        split_dataset.setToolTip("第四步（标注完成后）：按比例拆分 train/val 并生成训练所需 data.yaml")
-        split_dataset.clicked.connect(self.split_dataset)
-        project.addWidget(split_dataset)
-        generate_yaml = QPushButton("仅生成 YAML")
-        generate_yaml.setToolTip("仅根据当前项目与类别重新生成 data.yaml，不重新拆分图片")
-        generate_yaml.clicked.connect(self.generate_yaml)
-        project.addWidget(generate_yaml)
+        dataset_button = QPushButton("划分训练/验证并生成 YAML")
+        dataset_button.setToolTip("按比例划分训练集和验证集，并生成 data.yaml")
+        dataset_button.clicked.connect(self.split_dataset)
+        project.addWidget(dataset_button)
         header_layout.addLayout(project)
 
         classes = QHBoxLayout()
         classes.setSpacing(8)
         classes.addWidget(QLabel("类别列表"))
-        self.class_names.setPlaceholderText("类别名（多个类别以逗号隔开，如: cat,dog），按回车保存")
-        self.class_names.setToolTip("第二步：输入识别目标名称，多个类别用逗号隔开，按回车或点“保存类别”立即生效并持久化")
-        self.class_names.returnPressed.connect(self.save_classes)
+        self.class_names.setPlaceholderText("多个类别用逗号隔开")
+        self.class_names.setToolTip("编辑类别后按回车或移开焦点自动保存；多个类别用逗号隔开")
+        self.class_names.setMaximumWidth(360)
+        self.class_names.editingFinished.connect(self.save_classes)
         classes.addWidget(self.class_names, 1)
-        save_classes = QPushButton("保存类别")
-        save_classes.setToolTip("保存并应用类别，同步写入项目的 classes.txt")
-        save_classes.clicked.connect(self.save_classes)
-        classes.addWidget(save_classes)
         add_class = QPushButton("添加类别")
-        add_class.setToolTip("弹窗输入并追加一个新类别")
+        add_class.setToolTip("添加新类别并自动保存")
         add_class.clicked.connect(self.add_class)
         classes.addWidget(add_class)
         remove_class = QPushButton("删除类别")
@@ -946,6 +1073,7 @@ class AnnotationPage(QWidget):
         classes.addWidget(QLabel("标注模式"))
         self.mode_combo.setToolTip("选择标注形状：矩形框 (检测)、分割多边形 (分割) 或 SAM 交互式点选")
         classes.addWidget(self.mode_combo)
+        classes.addStretch(1)
         header_layout.addLayout(classes)
         layout.addWidget(header)
         splitter = QSplitter()
@@ -995,14 +1123,13 @@ class AnnotationPage(QWidget):
         unset_negative.clicked.connect(self.unset_negative)
         delete_selected = QPushButton("删除选中")
         delete_selected.clicked.connect(self.canvas.delete_selected)
-        change_selected_class = QPushButton("选中标注改为当前类别")
-        change_selected_class.clicked.connect(self.change_selected_class)
+        delete_selected.setToolTip("在图片上点击标注框选中后删除；分割多边形可按住 Ctrl 点击选中")
         reset_view = QPushButton("适应窗口")
         reset_view.clicked.connect(self.canvas.reset_view)
-        grid = QPushButton("显示/隐藏网格")
-        grid.clicked.connect(self.canvas.toggle_grid)
         jump_unlabeled = QPushButton("下一张未标注")
         jump_unlabeled.clicked.connect(self.jump_unlabeled)
+        delete_image = QPushButton("删除照片")
+        delete_image.clicked.connect(self.delete_image)
 
         settings = QFrame()
         settings.setObjectName("settingsPanel")
@@ -1016,12 +1143,11 @@ class AnnotationPage(QWidget):
             next_button,
             jump_unlabeled,
             delete_selected,
-            change_selected_class,
             clear,
             set_negative,
             unset_negative,
             reset_view,
-            grid,
+            delete_image,
         ):
             settings_layout.addWidget(button)
         settings_layout.addStretch(1)
@@ -1067,6 +1193,8 @@ class AnnotationPage(QWidget):
         canvas_layout.addWidget(self.canvas, 1)
         self.canvas_status = QLabel()
         self.canvas_status.setObjectName("canvasStatus")
+        # A long filename must not set the minimum width of the canvas area.
+        self.canvas_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         canvas_layout.addWidget(self.canvas_status)
         splitter.addWidget(canvas_workspace)
         splitter.setStretchFactor(0, 0)
@@ -1090,11 +1218,11 @@ class AnnotationPage(QWidget):
         self.mode_combo.currentIndexChanged.connect(lambda index: self._set_mode(self.mode_combo.itemData(index)))
         self._save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self._save_shortcut.activated.connect(self.save_current)
-        self._previous_shortcut = QShortcut(QKeySequence("A"), self.canvas)
-        self._previous_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._previous_shortcut = QShortcut(QKeySequence("A"), self)
+        self._previous_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._previous_shortcut.activated.connect(self.previous_image)
-        self._next_shortcut = QShortcut(QKeySequence("D"), self.canvas)
-        self._next_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._next_shortcut = QShortcut(QKeySequence("D"), self)
+        self._next_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._next_shortcut.activated.connect(self.next_image)
         self._sam_busy = False
         self._update_canvas_status()
@@ -1136,6 +1264,24 @@ class AnnotationPage(QWidget):
         self.load_classes()
         self.status_changed.emit(f"已加载 {len(self.images)} 张图片")
         self.update_stats()
+
+    def capture_images(self) -> None:
+        root_text = self.project_root.text().strip()
+        if not root_text or not Path(root_text).is_dir():
+            QMessageBox.warning(self, "实时采集", "请先打开有效的项目目录。")
+            return
+        root = Path(root_text)
+        image_root, _ = _source_images(root)
+        dialog = CaptureDialog(image_root, self)
+        dialog.exec()
+        if not dialog.saved_count:
+            return
+        current = self.images[self.index] if 0 <= self.index < len(self.images) else None
+        _, self.images = _source_images(root)
+        self.index = self.images.index(current) if current in self.images else -1
+        self.apply_image_filter()
+        self.update_stats()
+        self.status_changed.emit(f"已采集 {dialog.saved_count} 张图片，可在图片导航中查看和标注")
 
     def apply_image_filter(self) -> None:
         query = self.image_search.text().strip().lower()
@@ -1189,6 +1335,42 @@ class AnnotationPage(QWidget):
 
     def next_image(self) -> None:
         self._step_image(1)
+
+    def delete_image(self) -> None:
+        if not 0 <= self.index < len(self.images):
+            QMessageBox.information(self, "删除照片", "请先打开一张图片。")
+            return
+        image = self.images[self.index]
+        answer = QMessageBox.question(
+            self, "删除照片",
+            f"永久删除照片“{image.name}”？此操作无法撤销。\n"
+            "标注文件和已划分的训练/验证集副本将保留，同名图片可能重新关联此标注。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.save_current()
+            image.unlink()
+        except OSError as exc:
+            QMessageBox.warning(self, "删除照片", f"无法删除照片：{exc}")
+            return
+        position = self.visible_indices.index(self.index) if self.index in self.visible_indices else 0
+        self.images.pop(self.index)
+        self._state_cache.pop(image, None)
+        self.index = -1
+        self._dirty = False
+        self.canvas.set_mode(self.mode_combo.currentData())
+        self.canvas.set_image(Path(), [])
+        self.refresh_annotation_list()
+        self.apply_image_filter()
+        if self.visible_indices:
+            self.select_image(self.visible_indices[min(position, len(self.visible_indices) - 1)])
+        else:
+            self._update_canvas_status()
+        self.update_stats()
+        self.status_changed.emit(f"已删除照片：{image.name}；标注文件和数据集副本保留")
 
     def jump_unlabeled(self) -> None:
         if not self.visible_indices:
@@ -1271,7 +1453,9 @@ class AnnotationPage(QWidget):
             context = f"图片：{self.index + 1}/{len(self.images)} · {image.name} · 标注：{len(self.canvas.annotations)}"
         else:
             context = "尚未打开图片"
-        self.canvas_status.setText(f"{mode}  |  当前类别：{current}  |  {context}")
+        status = f"{mode}  |  当前类别：{current}  |  {context}"
+        self.canvas_status.setText(status)
+        self.canvas_status.setToolTip(status)
 
     def _select_class_from_list(self, class_id: int) -> None:
         if 0 <= class_id < self.class_combo.count():
@@ -1347,28 +1531,23 @@ class AnnotationPage(QWidget):
             return
         if not 0 <= index < len(names):
             return
-        root = Path(self.project_root.text())
-        if any((root / "labels").rglob("*.txt")) or self.canvas.annotations:
-            QMessageBox.warning(self, "类别管理", "已有标签时不能删除类别，以免改变标签编号。")
+        root_text = self.project_root.text().strip()
+        if root_text and Path(root_text).is_dir():
+            try:
+                self.save_current()
+                remove_unused_class(Path(root_text), names, index)
+            except (DatasetError, OSError, UnicodeError) as exc:
+                QMessageBox.warning(self, "类别管理", str(exc))
+                return
+        elif self.canvas.annotations:
+            QMessageBox.warning(self, "类别管理", "请先打开项目目录，才能安全删除类别。")
             return
         del names[index]
         self.class_names.setText(",".join(names))
-        self.save_classes()
-    def generate_yaml(self) -> None:
-        root_text = self.project_root.text().strip()
-        if not root_text:
-            QMessageBox.warning(self, "数据集配置", "请先打开项目目录。")
-            return
-        names = [name.strip() for name in self.class_names.text().split(",") if name.strip()]
-        if not names:
-            QMessageBox.warning(self, "数据集配置", "请至少填写一个类别名称。")
-            return
-        class_path = self.class_file_path()
-        if class_path:
-            class_path.write_text("\n".join(names) + "\n", encoding="utf-8")
-        target = make_dataset_yaml(root_text, names)
-        self.dataset_ready.emit(str(target))
-        self.status_changed.emit(f"已保存类别并生成数据集配置：{target}")
+        self.refresh_classes()
+        if self.index >= 0:
+            self.select_image(self.index)
+        self.status_changed.emit("类别已删除，相关标注编号已更新")
 
     def split_dataset(self) -> None:
         root_text = self.project_root.text().strip()
@@ -1443,6 +1622,14 @@ class AnnotationPage(QWidget):
             negative += state == "negative"
         unlabeled = max(0, total - labeled - negative)
         self.status_stats_label.setText(f"图片总数: {total}  已标注: {labeled}  未标注: {unlabeled}  负样本: {negative}")
+        # Reserve enough room for any count in this dataset, so changes in
+        # the number of digits do not shift the neighbouring controls.
+        digits = len(str(total))
+        metrics = self.status_stats_label.fontMetrics()
+        widest_digit = max("0123456789", key=metrics.horizontalAdvance)
+        count = widest_digit * digits
+        sample = f"图片总数: {count}  已标注: {count}  未标注: {count}  负样本: {count}"
+        self.status_stats_label.setFixedWidth(metrics.horizontalAdvance(sample) + 24)
         self.stats_changed.emit(total, labeled, unlabeled, negative)
         self.image_list.blockSignals(True)
         current = self.image_list.currentRow()
@@ -1591,12 +1778,6 @@ class AnnotationPage(QWidget):
         self._match_busy = False
         self._match_run_button.setEnabled(True)
 
-    def change_selected_class(self) -> None:
-        class_id = self.class_combo.currentIndex()
-        if self.canvas.set_selected_class(class_id):
-            self.status_changed.emit("已更新选中标注的类别")
-        else:
-            QMessageBox.information(self, "标注编辑", "请先点击一个已有标注进行选中。")
 
     def _sam_point_clicked(self, _x: float, _y: float, label: int) -> None:
         point_type = "正点" if label == 1 else "负点"
@@ -1642,16 +1823,29 @@ class AnnotationPage(QWidget):
                 self._sam_annotator = SamAnnotator(model)
                 self._sam_model_path = model
             results = self._sam_annotator.segment(image, points=pixel_points, labels=labels)
-            if not results or results[0].masks is None or not results[0].masks.xy:
+            if not results or results[0].masks is None:
                 raise RuntimeError("模型没有返回有效掩膜")
-            polygons = results[0].masks.xy
-            polygon = max(polygons, key=self._polygon_area)
-            normalized = tuple((float(x) / width, float(y) / height) for x, y in polygon)
+            masks = results[0].masks
+            if output == "segment":
+                positive_points = [point for point, label in zip(points, labels) if label == 1]
+                normalized, ignored, missed = main_mask_contour(masks, positive_points)
+            else:
+                polygons = masks.xy
+                if not polygons:
+                    raise RuntimeError("模型没有返回有效掩膜")
+                polygon = max(polygons, key=self._polygon_area)
+                normalized = tuple((float(x) / width, float(y) / height) for x, y in polygon)
+                ignored, missed = 0, False
             if len(normalized) < 3:
                 raise RuntimeError("掩膜轮廓点不足")
             self.sam_result_ready.emit((image, class_id, normalized, output))
             result_name = "矩形框" if output == "detect" else "多边形"
-            self.status_changed.emit(f"SAM 完成，已生成{result_name}")
+            message = f"SAM 完成，已生成{result_name}"
+            if ignored:
+                message += f"；已忽略 {ignored} 个分离区域，请检查目标是否完整"
+            if missed:
+                message += "；正点未落在有效轮廓内，请检查结果"
+            self.status_changed.emit(message)
         except Exception as exc:
             self.sam_failed.emit(str(exc))
         finally:
@@ -1664,11 +1858,102 @@ class AnnotationPage(QWidget):
         return abs(sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(values, values[1:] + values[:1]))) / 2
 
 
+class TrainingChart(QWidget):
+    """Small, dependency-free chart for per-epoch training metrics."""
+
+    def __init__(self, title: str, series: tuple[tuple[str, str, str], ...], fixed_max=None) -> None:
+        super().__init__()
+        self.title = title
+        self.series = series
+        self.fixed_max = fixed_max
+        self.points: list[dict] = []
+        self.setMinimumHeight(155)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def clear(self) -> None:
+        self.points.clear()
+        self.update()
+
+    def add_point(self, point: dict) -> None:
+        self.points.append(point)
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if not self.points or not 55 <= event.position().x() <= self.width() - 15:
+            self.setToolTip("")
+            return
+        epochs = [int(point["epoch"]) for point in self.points]
+        low, high = min(epochs), max(epochs)
+        epoch = low + (event.position().x() - 55) / max(1, self.width() - 70) * (high - low)
+        point = min(self.points, key=lambda item: abs(int(item["epoch"]) - epoch))
+        lines = [f"轮次 {point['epoch']}"]
+        lines.extend(f"{label}: {float(point[key]):.6g}" for key, label, _ in self.series if point.get(key) is not None)
+        self.setToolTip("\n".join(lines))
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        text = self.palette().color(QPalette.ColorRole.WindowText)
+        muted = QColor(text)
+        muted.setAlpha(145)
+        grid = QColor(text)
+        grid.setAlpha(40)
+        painter.setPen(text)
+        painter.drawText(10, 20, self.title)
+        legend_x = 10
+        for key, label, color in self.series:
+            if not any(point.get(key) is not None for point in self.points):
+                continue
+            painter.setPen(QPen(QColor(color), 3))
+            painter.drawLine(legend_x, 36, legend_x + 14, 36)
+            painter.setPen(muted)
+            painter.drawText(legend_x + 19, 40, label)
+            legend_x += painter.fontMetrics().horizontalAdvance(label) + 38
+        area = QRectF(55, 49, max(1, self.width() - 70), max(1, self.height() - 78))
+        values = [float(p[key]) for p in self.points for key, _, _ in self.series if p.get(key) is not None]
+        upper = self.fixed_max if self.fixed_max is not None else max(values, default=0) * 1.1
+        upper = max(float(upper), 0.001)
+        for i in range(5):
+            y = area.bottom() - area.height() * i / 4
+            painter.setPen(QPen(grid, 1))
+            painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y))
+            painter.setPen(muted)
+            painter.drawText(QRectF(0, y - 8, 49, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{upper * i / 4:.3g}")
+        if not values:
+            painter.setPen(muted)
+            painter.drawText(area, Qt.AlignmentFlag.AlignCenter, "等待首轮训练和验证完成")
+            return
+        epochs = [int(point["epoch"]) for point in self.points]
+        low, high = min(epochs), max(epochs)
+        for key, _, color in self.series:
+            painter.setPen(QPen(QColor(color), 2))
+            previous = None
+            for point in self.points:
+                value = point.get(key)
+                if value is None:
+                    previous = None
+                    continue
+                x = area.center().x() if high == low else area.left() + (int(point["epoch"]) - low) / (high - low) * area.width()
+                y = area.bottom() - min(1.0, max(0.0, float(value) / upper)) * area.height()
+                current = QPointF(x, y)
+                if previous is not None:
+                    painter.drawLine(previous, current)
+                painter.drawEllipse(current, 2.5, 2.5)
+                previous = current
+        painter.setPen(muted)
+        ticks = sorted({round(low + (high - low) * i / 4) for i in range(5)})
+        for epoch in ticks:
+            x = area.center().x() if high == low else area.left() + (epoch - low) / (high - low) * area.width()
+            painter.drawText(QRectF(x - 25, area.bottom() + 5, 50, 18), Qt.AlignmentFlag.AlignCenter, str(epoch))
+
+
 class TrainingPage(QWidget):
     status_changed = Signal(str)
     model_trained = Signal(str)
     job_finished = Signal()
     export_finished = Signal()
+    metrics_ready = Signal(object)
     def __init__(self) -> None:
         super().__init__()
         self._stop_event = Event()
@@ -1721,7 +2006,7 @@ class TrainingPage(QWidget):
         self.log = QTextEdit()
         self.log.setObjectName("taskLog")
         self.log.setReadOnly(True)
-        self.log.setMinimumHeight(450)
+        self.log.setMinimumHeight(200)
         self.model_browse = QPushButton("浏览")
         self.data_browse = QPushButton("浏览")
         layout = QVBoxLayout(self)
@@ -1732,37 +2017,65 @@ class TrainingPage(QWidget):
         layout.addWidget(title)
         training_card = QGroupBox("训练参数")
         training_card.setObjectName("trainingCard")
-        training_form = QFormLayout(training_card)
+        training_form = QGridLayout(training_card)
         training_form.setContentsMargins(14, 14, 14, 14)
         training_form.setHorizontalSpacing(14)
         training_form.setVerticalSpacing(9)
+        training_form.setColumnStretch(1, 1)
+        training_form.setColumnStretch(3, 1)
         model_row = QHBoxLayout()
+        model_row.setSpacing(6)
         model_row.addWidget(self.model, 1)
         model_row.addWidget(self.model_browse)
         data_row = QHBoxLayout()
+        data_row.setSpacing(6)
         data_row.addWidget(self.data, 1)
         data_row.addWidget(self.data_browse)
-        training_form.addRow("模型", model_row)
-        training_form.addRow("数据集 YAML", data_row)
-        training_form.addRow("训练轮数", self.epochs)
-        training_form.addRow("图片尺寸", self.imgsz)
-        training_form.addRow("批次大小", self.batch)
-        training_form.addRow("早停耐心值", self.patience)
-        training_form.addRow("数据线程数", self.workers)
-        training_form.addRow("计算设备", self.device)
-        training_form.addRow("输出目录", self.project)
-        training_form.addRow("实验名称", self.name)
+        training_form.addWidget(QLabel("模型"), 0, 0)
+        training_form.addLayout(model_row, 0, 1, 1, 3)
+        training_form.addWidget(QLabel("数据集 YAML"), 1, 0)
+        training_form.addLayout(data_row, 1, 1, 1, 3)
+        rows = (
+            ("训练轮数", self.epochs, "图片尺寸", self.imgsz),
+            ("批次大小", self.batch, "早停耐心值", self.patience),
+            ("数据线程数", self.workers, "计算设备", self.device),
+            ("输出目录", self.project, "实验名称", self.name),
+        )
+        for row, (left_label, left_field, right_label, right_field) in enumerate(rows, 2):
+            training_form.addWidget(QLabel(left_label), row, 0)
+            training_form.addWidget(left_field, row, 1)
+            training_form.addWidget(QLabel(right_label), row, 2)
+            training_form.addWidget(right_field, row, 3)
         training_buttons = QHBoxLayout()
+        training_buttons.setSpacing(8)
         training_buttons.addWidget(self.start)
         training_buttons.addWidget(self.stop)
-        training_form.addRow(training_buttons)
+        training_form.addLayout(training_buttons, 6, 0, 1, 4)
         layout.addWidget(training_card)
+        charts = QHBoxLayout()
+        charts.setSpacing(12)
+        self.map_chart = TrainingChart("验证 mAP50", (("map50_box", "检测框", "#3b82f6"), ("map50_mask", "分割掩膜", "#a855f7")), fixed_max=1.0)
+        self.loss_chart = TrainingChart("训练总 Loss（各项之和）", (("train_loss", "训练", "#f97316"),))
+        for title, chart in (("mAP50", self.map_chart), ("Loss", self.loss_chart)):
+            card = QGroupBox(title)
+            card.setObjectName("trainingCard")
+            chart_layout = QVBoxLayout(card)
+            chart_layout.setContentsMargins(8, 8, 8, 8)
+            chart_layout.addWidget(chart)
+            charts.addWidget(card, 1)
+        layout.addLayout(charts)
+        self.metrics_ready.connect(self._add_metrics)
+        export_toggle = QPushButton("展开模型转换")
+        export_toggle.setCheckable(True)
+        layout.addWidget(export_toggle)
         export_card = QGroupBox("模型转换")
         export_card.setObjectName("trainingConvertCard")
-        export_form = QFormLayout(export_card)
+        export_form = QGridLayout(export_card)
         export_form.setContentsMargins(14, 14, 14, 14)
         export_form.setHorizontalSpacing(14)
         export_form.setVerticalSpacing(9)
+        export_form.setColumnStretch(1, 1)
+        export_form.setColumnStretch(3, 1)
 
         self.export_imgsz_label = QLabel("导出图片尺寸")
         self.export_opset_label = QLabel("ONNX Opset")
@@ -1813,16 +2126,29 @@ class TrainingPage(QWidget):
         export_model_row = QHBoxLayout()
         export_model_row.addWidget(self.export_model_path, 1)
         export_model_row.addWidget(self.export_model_browse)
-        export_form.addRow("待转换模型", export_model_row)
-        export_form.addRow("导出格式", self.export_format)
-        export_form.addRow(self.maix_preset_label, self.maix_preset_widget)
-        export_form.addRow(self.export_imgsz_label, self.imgsz_widget)
-        export_form.addRow(self.maix_quantize_label, self.maix_quantize_widget)
-        export_form.addRow(self.maix_calib_label, self.maix_calib_widget)
-        export_form.addRow(self.maix_docker_label, self.maix_docker_widget)
-        export_form.addRow(self.export_opset_label, self.opset_widget)
-        export_form.addRow(self.export_simplify_label, self.simplify_widget)
-        export_form.addRow(self.export_button)
+        export_form.addWidget(QLabel("待转换模型"), 0, 0)
+        export_form.addLayout(export_model_row, 0, 1, 1, 3)
+        export_form.addWidget(QLabel("导出格式"), 1, 0)
+        export_form.addWidget(self.export_format, 1, 1)
+        export_form.addWidget(self.export_imgsz_label, 1, 2)
+        export_form.addWidget(self.imgsz_widget, 1, 3)
+        # The ONNX and MaixCAM controls share positions but are never visible together.
+        export_form.addWidget(self.export_opset_label, 2, 0)
+        export_form.addWidget(self.opset_widget, 2, 1)
+        export_form.addWidget(self.export_simplify_label, 2, 2)
+        export_form.addWidget(self.simplify_widget, 2, 3)
+        export_form.addWidget(self.maix_preset_label, 2, 0)
+        export_form.addWidget(self.maix_preset_widget, 2, 1)
+        export_form.addWidget(self.maix_quantize_label, 2, 2)
+        export_form.addWidget(self.maix_quantize_widget, 2, 3)
+        export_form.addWidget(self.maix_calib_label, 3, 0)
+        export_form.addWidget(self.maix_calib_widget, 3, 1, 1, 3)
+        export_form.addWidget(self.maix_docker_label, 4, 0)
+        export_form.addWidget(self.maix_docker_widget, 4, 1, 1, 3)
+        export_form.addWidget(self.export_button, 5, 0, 1, 4)
+        export_card.hide()
+        export_toggle.toggled.connect(export_card.setVisible)
+        export_toggle.toggled.connect(lambda expanded: export_toggle.setText("收起模型转换" if expanded else "展开模型转换"))
         layout.addWidget(export_card)
         log_card = QGroupBox("训练日志")
         log_card.setObjectName("trainingLogCard")
@@ -1847,6 +2173,11 @@ class TrainingPage(QWidget):
         self.export_finished.connect(lambda: self.export_button.setEnabled(True))
         self.status_changed.connect(self.log_message)
         self._on_export_format_changed()
+
+    def _add_metrics(self, metrics: object) -> None:
+        if isinstance(metrics, dict):
+            self.map_chart.add_point(metrics)
+            self.loss_chart.add_point(metrics)
 
     def _on_model_trained_internal(self, model_path: str) -> None:
         self.export_model_path.setText(model_path)
@@ -1933,6 +2264,8 @@ class TrainingPage(QWidget):
         self.stop.setEnabled(True)
         self._stop_event.clear()
         self.log.clear()
+        self.map_chart.clear()
+        self.loss_chart.clear()
         self.status_changed.emit("正在训练模型")
         TASKS.submit(self, self._work, (config,), on_cancel=self.job_finished.emit)
 
@@ -1994,7 +2327,7 @@ class TrainingPage(QWidget):
             except ImportError:
                 pass
             with redirect_stdout(stream), redirect_stderr(stream):
-                result = train(config, stop_event=self._stop_event)
+                result = train(config, stop_event=self._stop_event, metrics_callback=self.metrics_ready.emit)
             stream.flush()
             output_dir = getattr(result, "save_dir", None)
             if output_dir:
@@ -2049,6 +2382,8 @@ class ValidationPage(QWidget):
         self._is_running = False
         self._stop_event = threading.Event()
         self._last_pixmap: QPixmap | None = None
+        self._confidence_lock = threading.Lock()
+        self._confidence_value = 0.25
 
         self.model = QLineEdit("best.pt")
         self.image = QLineEdit()
@@ -2061,7 +2396,18 @@ class ValidationPage(QWidget):
         self.source_kind.addItem("图片目录", "folder")
         self.source_kind.addItem("视频文件", "video")
         self.output_dir = QLineEdit("runs/validation")
-        self.confidence = QLineEdit("0.25")
+        self.confidence = QDoubleSpinBox()
+        self.confidence.setRange(0.0, 1.0)
+        self.confidence.setDecimals(2)
+        self.confidence.setSingleStep(0.01)
+        self.confidence.setValue(self._confidence_value)
+        self.confidence.setToolTip("摄像头推理时可实时调整置信度")
+        self.confidence_slider = QSlider(Qt.Orientation.Horizontal)
+        self.confidence_slider.setRange(0, 100)
+        self.confidence_slider.setValue(25)
+        self.confidence_slider.setToolTip("摄像头推理时可实时调整置信度")
+        self.confidence_slider.valueChanged.connect(lambda value: self.confidence.setValue(value / 100))
+        self.confidence.valueChanged.connect(self._on_confidence_changed)
         self.run_button = QPushButton("开始实时推理")
         self.run_button.setObjectName("primaryButton")
         self.preview = QLabel("请选择模型并开始实时推理")
@@ -2119,7 +2465,10 @@ class ValidationPage(QWidget):
         parameter_section = QLabel("推理参数")
         parameter_section.setObjectName("formSection")
         form.addRow(parameter_section)
-        form.addRow("置信度", self.confidence)
+        confidence_row = QHBoxLayout()
+        confidence_row.addWidget(self.confidence_slider, 1)
+        confidence_row.addWidget(self.confidence)
+        form.addRow("置信度", confidence_row)
         form.addRow(self.run_button)
 
         layout = QVBoxLayout(self)
@@ -2193,7 +2542,14 @@ class ValidationPage(QWidget):
         self.image_browse.setEnabled(enabled)
         self.output_dir.setEnabled(enabled)
         self.output_browse.setEnabled(enabled)
-        self.confidence.setEnabled(enabled)
+        confidence_enabled = enabled or (self._is_running and self.source_kind.currentData() == "camera")
+        self.confidence.setEnabled(confidence_enabled)
+        self.confidence_slider.setEnabled(confidence_enabled)
+
+    def _on_confidence_changed(self, value: float) -> None:
+        self.confidence_slider.setValue(round(value * 100))
+        with self._confidence_lock:
+            self._confidence_value = value
 
     def choose_model(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "选择模型", self.model.text(), "模型 (*.pt *.onnx *.engine);;所有文件 (*.*)")
@@ -2226,11 +2582,7 @@ class ValidationPage(QWidget):
         if not model_path.is_file():
             QMessageBox.warning(self, "模型验证", f"模型文件不存在：{self.model.text()}\n请先选择有效的模型权重（如 best.pt）。")
             return
-        try:
-            confidence = float(self.confidence.text().strip())
-        except ValueError:
-            QMessageBox.warning(self, "模型验证", "置信度必须是数字。")
-            return
+        confidence = self.confidence.value()
 
         kind = self.source_kind.currentData()
         if kind == "camera":
@@ -2251,7 +2603,7 @@ class ValidationPage(QWidget):
             self._set_inputs_enabled(False)
             self.run_button.setText("停止实时推理")
             self.status_changed.emit("正在启动实时摄像头推理...")
-            TASKS.submit(self, self._camera_work, (str(model_path), cam_source, confidence), on_cancel=self.job_finished.emit)
+            TASKS.submit(self, self._camera_work, (str(model_path), cam_source), on_cancel=self.job_finished.emit)
         else:
             source = Path(self.image.text().strip())
             source_ok = source.is_dir() if kind == "folder" else source.is_file()
@@ -2271,7 +2623,7 @@ class ValidationPage(QWidget):
                 on_cancel=self.job_finished.emit,
             )
 
-    def _camera_work(self, model_path: str, cam_source: int | str, confidence: float) -> None:
+    def _camera_work(self, model_path: str, cam_source: int | str) -> None:
         cap = None
         try:
             import time
@@ -2295,6 +2647,8 @@ class ValidationPage(QWidget):
                     time.sleep(0.01)
                     continue
 
+                with self._confidence_lock:
+                    confidence = self._confidence_value
                 results = model.predict(frame, conf=confidence, verbose=False)
                 annotated = results[0].plot()
 
@@ -2961,9 +3315,9 @@ class MainWindow(QMainWindow):
             self.setStyleSheet(
                 "QMainWindow, QWidget { background: #0f1117; color: #e2e8f0; }"
                 "QToolBar { background: #141721; border: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.07); spacing: 4px; padding: 6px 8px; }"
-                "QToolButton { color: #cbd5e1; padding: 6px 12px; border-radius: 6px; border: 1px solid transparent; }"
-                "QToolButton:hover { background: #1c2230; color: #f0f6fc; border: 1px solid rgba(255, 255, 255, 0.08); }"
-                "QToolButton:checked { background: rgba(59, 130, 246, 0.18); border: 1px solid #3b82f6; color: #60a5fa; font-weight: 600; }"
+                "QToolBar QToolButton { color: #cbd5e1; padding: 6px 12px; border-radius: 6px; border: 1px solid transparent; }"
+                "QToolBar QToolButton:hover { background: #1c2230; color: #f0f6fc; border: 1px solid rgba(255, 255, 255, 0.08); }"
+                "QToolBar QToolButton:checked { background: rgba(59, 130, 246, 0.18); border: 1px solid #3b82f6; color: #60a5fa; font-weight: 600; }"
                 "QLabel#appBrand { color: #f0f6fc; font-size: 15px; font-weight: 600; padding: 0 8px 0 2px; }"
                 "QLabel#localMode { color: #34d399; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 9px; padding: 2px 8px; margin-left: 6px; font-size: 11px; font-weight: 500; }"
                 "QFrame#sidebar { background: #0b0d13; border: 0; border-right: 1px solid rgba(255, 255, 255, 0.07); }"
@@ -3064,9 +3418,9 @@ class MainWindow(QMainWindow):
             self.setStyleSheet(
                 "QMainWindow, QWidget { background: #f8fafc; color: #1e293b; }"
                 "QToolBar { background: #ffffff; border: 0; border-bottom: 1px solid #e2e8f0; spacing: 4px; padding: 6px 8px; }"
-                "QToolButton { color: #334155; padding: 6px 12px; border-radius: 6px; border: 1px solid transparent; }"
-                "QToolButton:hover { background: #f1f5f9; color: #0f172a; border: 1px solid #cbd5e1; }"
-                "QToolButton:checked { background: #eff6ff; border: 1px solid #3b82f6; color: #2563eb; font-weight: 600; }"
+                "QToolBar QToolButton { color: #334155; padding: 6px 12px; border-radius: 6px; border: 1px solid transparent; }"
+                "QToolBar QToolButton:hover { background: #f1f5f9; color: #0f172a; border: 1px solid #cbd5e1; }"
+                "QToolBar QToolButton:checked { background: #eff6ff; border: 1px solid #3b82f6; color: #2563eb; font-weight: 600; }"
                 "QLabel#appBrand { color: #0f172a; font-size: 15px; font-weight: 600; padding: 0 8px 0 2px; }"
                 "QLabel#localMode { color: #059669; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 9px; padding: 2px 8px; margin-left: 6px; font-size: 11px; font-weight: 500; }"
                 "QFrame#sidebar { background: #f1f5f9; border: 0; border-right: 1px solid #e2e8f0; }"
@@ -3187,6 +3541,13 @@ def main() -> None:
         os.chdir(Path(sys.executable).resolve().parent)
     _relaunch_with_cuda_runtime()
     app = QApplication([])
+    # Qt's built-in dialogs need their own translations even when application
+    # strings are already Chinese (including in a C.UTF-8 Docker locale).
+    translator = _FileDialogTranslator(app)
+    translations_dir = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    translator.load("qtbase_zh_CN", translations_dir)
+    app.installTranslator(translator)
+    app._qt_translator = translator
     wheel_filter = PreventWheelSwitchFilter(app)
     app.installEventFilter(wheel_filter)
     font = QFont()
