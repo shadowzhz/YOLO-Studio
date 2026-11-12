@@ -1,5 +1,6 @@
 @echo off
 chcp 65001 >nul
+pushd "%~dp0.."
 title YOLO Studio (Native Windows)
 
 echo ==================================================
@@ -11,6 +12,7 @@ python --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [错误] 未检测到 Python，请先安装 Python 3.10 - 3.12 并添加到 PATH。
     pause
+    popd
     exit /b 1
 )
 
@@ -21,6 +23,7 @@ if not exist "venv" (
     if %errorlevel% neq 0 (
         echo [错误] 创建虚拟环境失败！
         pause
+        popd
         exit /b 1
     )
 )
@@ -37,15 +40,17 @@ if %errorlevel% neq 0 (
     if %errorlevel% neq 0 (
         echo [错误] 依赖安装失败，请检查网络！
         pause
+        popd
         exit /b 1
     )
 )
 
 echo [3/3] 正在启动主界面...
-python -m yolo_studio.qt_app
+python main.py
 
 if %errorlevel% neq 0 (
     echo.
     echo 程序异常退出。
     pause
 )
+popd

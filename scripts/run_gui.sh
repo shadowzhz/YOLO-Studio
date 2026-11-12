@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-# 获取脚本所在绝对目录
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 获取脚本上层的项目根目录
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # 确保 DISPLAY 变量存在（默认为 :0）
 export DISPLAY="${DISPLAY:-:0}"

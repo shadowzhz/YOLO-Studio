@@ -21,10 +21,10 @@
 
 #### 推荐：Docker 一键运行（免配环境，自动挂载 GPU 与 Docker 编译套接字）
 ```bash
-./run_gui.sh
+./scripts/run_gui.sh
 ```
-- 启动轻量 Tkinter 界面：`./run_gui.sh tk`
-- 进入容器终端：`./run_gui.sh bash`
+- 启动轻量 Tkinter 界面：`./scripts/run_gui.sh tk`
+- 进入容器终端：`./scripts/run_gui.sh bash`
 
 #### 原生 Python 运行
 ```bash
@@ -34,7 +34,8 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # 启动 PySide6 完整界面
-python3 -m yolo_studio.qt_app
+python3 main.py
+# 或: python3 -m yolo_studio.qt_app
 ```
 
 ---
@@ -56,13 +57,13 @@ python3 -m yolo_studio.qt_app
 发行包默认输出到 `dist`。如已有依赖的 wheel 文件，可传入 `-Wheelhouse` 从本地安装。
 
 #### 从源码启动
-直接双击根目录下的 **`start_windows.bat`**。  
-脚本会自动创建虚拟环境、安装 `requirements.txt` 依赖并启动 PySide6 主程序。
+- 直接双击 **`scripts\start_windows.bat`**（自动创建虚拟环境并安装依赖）。
+- 如果当前 Python 环境已安装依赖，直接在根目录运行 **`python main.py`**（等价于 `python -m yolo_studio.qt_app`）。
 
 #### 方式二：Docker Desktop 运行
-启动 Docker Desktop 后，双击 **`run_gui.bat`** 或在终端执行：
+启动 Docker Desktop 后，双击 **`scripts\run_gui.bat`** 或在终端执行：
 ```cmd
-run_gui.bat
+scripts\run_gui.bat
 ```
 
 ---
@@ -250,11 +251,13 @@ train(TrainingConfig(
 ## 项目结构
 
 ```text
+├── main.py                     # 根目录便捷启动入口（无参数启动 Qt 界面，带参数转发至 CLI）
 ├── Dockerfile                  # YOLO Studio 基础运行镜像（含 PySide6/Qt 依赖、字体、onnx 工具）
-├── run_gui.sh                  # Linux Docker 一键启动脚本（挂载 X11、GPU 与 docker.sock）
-├── run_gui.bat                 # Windows Docker 启动脚本
-├── start_windows.bat           # Windows 原生 Python 虚拟环境一键安装启动
 ├── requirements.txt            # 项目 Python 依赖声明
+├── scripts/                    # 启动脚本目录
+│   ├── run_gui.sh              # Linux Docker 一键启动脚本（挂载 X11、GPU 与 docker.sock）
+│   ├── run_gui.bat             # Windows Docker 启动脚本
+│   └── start_windows.bat       # Windows 原生 Python 虚拟环境一键安装启动
 ├── yolo_studio/                # 核心源码包
 │   ├── __init__.py             # 顶层符号导出
 │   ├── __main__.py             # 统一 CLI 命令行入口
@@ -296,11 +299,11 @@ train(TrainingConfig(
 
 ### 1. Linux Docker 启动报错 `cannot connect to X server`
 - 原因：X11 显示连接权限未放行。
-- 解决：在宿主机终端执行 `xhost +local:root` 后重新运行 `./run_gui.sh`。
+- 解决：在宿主机终端执行 `xhost +local:root` 后重新运行 `./scripts/run_gui.sh`。
 
 ### 2. Windows 下 Docker 图形界面未弹出
 - 原因：WSL2 的 WSLg 组件未就绪或未启动 X-Server。
-- 解决：强烈推荐改用根目录下的 **`start_windows.bat`** 原生运行，免除容器图形服务配置。
+- 解决：强烈推荐改用 **`scripts\start_windows.bat`** 原生运行，免除容器图形服务配置。
 
 ### 3. 没有 NVIDIA CUDA 独立显卡
 - 解决：将“计算设备”改为 `cpu`，或在 CLI 中传入 `--device cpu` 即可在纯 CPU 环境下执行训练与导出。
@@ -311,4 +314,4 @@ train(TrainingConfig(
 
 ### 5. 容器内调用 Docker 失败
 - 原因：宿主机 Docker 套接字未挂载。
-- 解决：最新版本的 `run_gui.sh` / `run_gui.bat` 已默认挂载 `/var/run/docker.sock`。若在无 Docker 环境下使用，流水线会在 `_staging/` 目录下生成 `convert_docker.sh`，可拷贝至任意具备 Docker 的机器一键转换。
+- 解决：最新版本的 `scripts/run_gui.sh` / `scripts/run_gui.bat` 已默认挂载 `/var/run/docker.sock`。若在无 Docker 环境下使用，流水线会在 `_staging/` 目录下生成 `convert_docker.sh`，可拷贝至任意具备 Docker 的机器一键转换。

@@ -295,6 +295,17 @@ class RegressionTests(unittest.TestCase):
                 window.annotation._sam_timer.stop()
                 window.close()
 
+    def test_root_main_entrypoint_dispatch(self):
+        import main as root_main
+
+        with patch("yolo_studio.qt_app.main") as qt_main:
+            root_main.main([])
+        qt_main.assert_called_once_with()
+
+        with patch("yolo_studio.__main__.main") as cli_entry:
+            root_main.main(["validate", "dataset"])
+        cli_entry.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

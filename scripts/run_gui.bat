@@ -1,5 +1,6 @@
 @echo off
 chcp 65001 >nul
+pushd "%~dp0.."
 title YOLO Studio (Docker for Windows)
 
 echo ==================================================
@@ -12,6 +13,7 @@ docker info >nul 2>&1
 if %errorlevel% neq 0 (
     echo [错误] Docker 引擎未启动，请先打开 Docker Desktop！
     pause
+    popd
     exit /b 1
 )
 
@@ -23,6 +25,7 @@ if %errorlevel% neq 0 (
     if %errorlevel% neq 0 (
         echo [错误] 镜像构建失败！
         pause
+        popd
         exit /b 1
     )
 )
@@ -65,6 +68,7 @@ if "%MODE%"=="tk" (
 
 if %errorlevel% neq 0 (
     echo.
-    echo [提示] 如果在 Windows 下图形界面无法弹出，推荐直接使用 start_windows.bat 原生运行。
+    echo [提示] 如果在 Windows 下图形界面无法弹出，推荐直接使用 scripts\start_windows.bat 原生运行。
     pause
 )
+popd
