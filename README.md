@@ -1,21 +1,29 @@
-# YOLO Studio
+# YOLO Studio 🎯
 
-一站式 YOLO 目标检测与分割工作台。集成了**交互式标注**、**SAM 2 辅助分割**、**数据集校验与切分**、**YOLO 本地训练**、**模型推理验证**，以及针对 **MaixCAM（算能 SG2002 / CV181x TPU）** 和常见工业推理引擎的**一键模型导出与量化编译**。
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10+-3776AB.svg?logo=python&logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/UI-PySide6%20%7C%20Qt-41CD52.svg?logo=qt&logoColor=white" alt="UI: PySide6">
+  <img src="https://img.shields.io/badge/AI-Ultralytics%20YOLO%20%7C%20SAM%202-blue.svg" alt="AI: YOLO + SAM 2">
+  <img src="https://img.shields.io/badge/Edge%20TPU-MaixCAM%20(SG2002)-orange.svg" alt="Edge TPU: MaixCAM">
+  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20Docker-lightgrey.svg" alt="Platform">
+</p>
 
-支持 **Linux** 与 **Windows** 双平台，提供 **原生 Python 环境** 与 **Docker 容器化** 两种运行方式。
-
----
-
-## 为什么选择 YOLO Studio
-
-- **全流程闭环**：标注、质检、切分、训练、验证、端侧量化部署均在同一工具内完成，无需频繁切换脚本与工具链。
-- **SAM 2 智能辅助**：内置 YOLO 目标定位与 SAM 2 多边形精细分割，批量生成高质量 Polygon 标注。
-- **开箱即用 MaixCAM 边缘部署**：自动裁剪 YOLO 末端后处理节点，调用 TPU-MLIR 编译器完成 INT8/BF16 量化，自动生成 `.cvimodel` 与 `.mud` 统一描述文件及板载测试代码。
-- **双端界面与命令行支持**：提供现代化的 PySide6 全功能桌面端、轻量 Tkinter 应急端以及完整的 CLI 自动化子命令。
+> **一站式 YOLO 目标检测与分割全生命周期工作台。**  
+> 集成交互式标注、SAM 2 智能辅助分割、数据集质检切分、YOLO 本地训练、实时推理验证，以及面向 **MaixCAM（算能 SG2002 TPU）** 等边缘硬件的一键裁剪量化编译流水线。
 
 ---
 
-## 快速启动 (Quick Start)
+## ✨ 核心特性 (Features)
+
+- 🔄 **全流程闭环**：标注、质检、切分、训练、验证、端侧量化部署均在同一工具内完成，无需频繁切换脚本与工具链。
+- 🪄 **SAM 2 智能辅助**：内置 YOLO 目标定位与 SAM 2 多边形精细分割，批量生成高质量 Polygon 分割标注。
+- ⚡ **开箱即用 MaixCAM 边缘部署**：自动裁剪 YOLO 末端后处理节点，调用 TPU-MLIR 编译器完成 INT8/BF16 量化，自动生成 `.cvimodel` 与 `.mud` 统一描述文件及板载测试代码。
+- 🖥️ **双端界面与全功能命令行**：提供现代化的 PySide6 全功能桌面端、轻量 Tkinter 应急端以及完整的 CLI 自动化子命令。
+- 🐳 **双平台极速启动**：支持 Linux 与 Windows 双平台，提供免环境配置的 Docker 一键启动脚本与原生虚拟环境支持。
+
+---
+
+## ⚡ 快速开始 (Quick Start)
 
 ### 🐧 Linux 用户
 
@@ -84,7 +92,7 @@ scripts\run_gui.bat
 
 ---
 
-## 核心功能与操作流程
+## 🖥️ 核心功能与操作流程 (Workflow)
 
 ```mermaid
 graph LR
@@ -118,9 +126,10 @@ graph LR
 
 ### 4. 模型验证
 - 加载已训练权重，支持实时连接摄像头进行流式推理验证（实时叠加检测框与帧率计算），推理过程中可通过滑块或数值框实时调整置信度；亦支持单张图片、文件夹图片或视频文件推理验证。
+
 ---
 
-## MaixCAM 边缘部署转换指南
+## 🚀 MaixCAM 边缘部署转换指南 (MaixCAM Edge Deployment)
 
 MaixCAM（矽速科技开发，搭载算能 SG2002 芯片，1 TOPS@INT8 TPU）在边缘端使用 **`.cvimodel`** 二进制模型和 **`.mud`** 描述文件。
 
@@ -165,7 +174,7 @@ python3 main.py
 
 ---
 
-## 命令行与 Python API 使用
+## 💻 命令行与 Python API 使用 (CLI & API)
 
 除了图形界面，项目还提供了完整的 CLI 接口和 Python API。
 
@@ -220,7 +229,7 @@ train(TrainingConfig(
 
 ---
 
-## 配置项速查表
+## ⚙️ 配置项速查表 (Configuration)
 
 ### 1. 训练参数 (`TrainingConfig`)
 
@@ -264,9 +273,10 @@ train(TrainingConfig(
 
 ---
 
-## 项目结构
+## 📁 项目结构 (Project Structure)
 
 ```text
+YOLO-Studio/
 ├── main.py                     # 根目录便捷启动入口（无参数启动 Qt 界面，带参数转发至 CLI）
 ├── Dockerfile                  # YOLO Studio 基础运行镜像（含 PySide6/Qt 依赖、字体、onnx 工具）
 ├── requirements.txt            # 项目 Python 依赖声明
@@ -317,23 +327,29 @@ train(TrainingConfig(
 
 ---
 
-## 常见问题与排查 (Troubleshooting)
+## 🛠️ 常见问题与排查 (Troubleshooting)
 
 ### 1. Linux Docker 启动报错 `cannot connect to X server`
-- 原因：X11 显示连接权限未放行。
-- 解决：在宿主机终端执行 `xhost +local:root` 后重新运行 `./scripts/run_gui.sh`。
+- **原因**：X11 显示连接权限未放行。
+- **解决**：在宿主机终端执行 `xhost +local:root` 后重新运行 `./scripts/run_gui.sh`。
 
 ### 2. Windows 下 Docker 图形界面未弹出
-- 原因：WSL2 的 WSLg 组件未就绪或未启动 X-Server。
-- 解决：强烈推荐改用 **`scripts\start_windows.bat`** 原生运行，免除容器图形服务配置。
+- **原因**：WSL2 的 WSLg 组件未就绪或未启动 X-Server。
+- **解决**：强烈推荐改用 **`scripts\start_windows.bat`** 原生运行，免除容器图形服务配置。
 
 ### 3. 没有 NVIDIA CUDA 独立显卡
-- 解决：将“计算设备”改为 `cpu`，或在 CLI 中传入 `--device cpu` 即可在纯 CPU 环境下执行训练与导出。
+- **解决**：将“计算设备”改为 `cpu`，或在 CLI 中传入 `--device cpu` 即可在纯 CPU 环境下执行训练与导出。
 
 ### 4. MaixCAM INT8 转换提示未检测到校准图片
-- 原因：未指定图片目录，且未选择有效的数据集 YAML。
-- 解决：流水线会自动降级为 `BF16` 精度继续完成编译并生成可用模型；如需 INT8 满速模型，只需在“INT8 校准集”中指定任意包含 30~50 张场景图片的文件夹。
+- **原因**：未指定图片目录，且未选择有效的数据集 YAML。
+- **解决**：流水线会自动降级为 `BF16` 精度继续完成编译并生成可用模型；如需 INT8 满速模型，只需在“INT8 校准集”中指定任意包含 30~50 张场景图片的文件夹。
 
 ### 5. 容器内调用 Docker 失败
-- 原因：宿主机 Docker 套接字未挂载。
-- 解决：最新版本的 `scripts/run_gui.sh` / `scripts/run_gui.bat` 已默认挂载 `/var/run/docker.sock`。若在无 Docker 环境下使用，流水线会在 `_staging/` 目录下生成 `convert_docker.sh`，可拷贝至任意具备 Docker 的机器一键转换。
+- **原因**：宿主机 Docker 套接字未挂载。
+- **解决**：最新版本的 `scripts/run_gui.sh` / `scripts/run_gui.bat` 已默认挂载 `/var/run/docker.sock`。若在无 Docker 环境下使用，流水线会在 `_staging/` 目录下生成 `convert_docker.sh`，可拷贝至任意具备 Docker 的机器一键转换。
+
+---
+
+## 📄 开源许可证与协议 (License)
+
+本项目代码目前未附加开放源代码许可证。请保留代码原作者署名，未经许可请勿默认作为可商用再分发项目。
