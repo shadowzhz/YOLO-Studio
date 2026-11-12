@@ -10,6 +10,8 @@ import shutil
 import subprocess
 from typing import Any, Callable, Sequence
 
+from .settings import resolve_model_path
+
 
 @dataclass
 class MaixCamConfig:
@@ -58,7 +60,7 @@ def detect_model_info(model_path: str | Path) -> dict[str, Any]:
     except ImportError as exc:
         raise RuntimeError("请先安装 ultralytics: pip install ultralytics") from exc
 
-    model_path = Path(model_path).resolve()
+    model_path = Path(resolve_model_path(model_path)).resolve()
     if not model_path.exists():
         raise FileNotFoundError(f"未找到模型权重文件：{model_path}")
 
@@ -396,7 +398,8 @@ def export_to_maixcam(config: MaixCamConfig) -> dict[str, Any]:
     log(f"   - 量化模式: {config.quantize}")
     log("==================================================")
 
-    model_info = detect_model_info(config.model_path)
+    resolved_model_path = resolve_model_path(config.model_path)
+    model_info = detect_model_info(resolved_model_path)
     model_name = model_info["model_name"]
     model_type = model_info["model_type"]
     detect_idx = model_info["detect_layer_idx"]
@@ -415,7 +418,7 @@ def export_to_maixcam(config: MaixCamConfig) -> dict[str, Any]:
     # 1. Export static ONNX
     raw_onnx_name = f"{model_name}_raw.onnx"
     raw_onnx_path = staging_dir / raw_onnx_name
-    sibling_onnx = Path(config.model_path).resolve().with_suffix(".onnx")
+    sibling_onnx = Path(resolved_model_path).resolve().with_suffix(".onnx")
     pre_existing_onnx = sibling_onnx.exists()
     log(f"[阶段 1] 正在导出静态 ONNX 到: {raw_onnx_path.name} ...")
     

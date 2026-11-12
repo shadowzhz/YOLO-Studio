@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..settings import default_model_dialog_path, resolve_model_path
 from ..tasks import TASKS
 from . import IMAGE_SUFFIXES
 
@@ -235,7 +236,7 @@ class ValidationPage(QWidget):
 
     def choose_model(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
-            self, "选择模型", self.model.text(), "模型 (*.pt *.onnx *.engine);;所有文件 (*.*)"
+            self, "选择模型", default_model_dialog_path(self.model.text()), "模型 (*.pt *.onnx *.engine);;所有文件 (*.*)"
         )
         if selected:
             self.model.setText(selected)
@@ -262,7 +263,7 @@ class ValidationPage(QWidget):
             self.run_button.setText("正在停止...")
             return
 
-        model_path = Path(self.model.text().strip())
+        model_path = Path(resolve_model_path(self.model.text()))
         if not model_path.is_file():
             QMessageBox.warning(self, "模型验证", f"模型文件不存在：{self.model.text()}\n请先选择有效的模型权重（如 best.pt）。")
             return

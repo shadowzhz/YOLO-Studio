@@ -48,7 +48,7 @@ python3 main.py
 
 构建发行包需要 Windows x64 的 Python 3.12、MinGW-w64（`gcc` 和 `windres`）、Python 嵌入包以及 `yolo11n.pt` 和 `sam2.1_t.pt` 两个权重。[Python 3.12.10 x64 嵌入包](https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip) · [Ultralytics v8.4.0 权重](https://github.com/ultralytics/assets/releases/tag/v8.4.0)
 
-将两个权重放在项目根目录，运行以下命令。
+将两个权重放在项目 `models/` 目录（或根目录），运行以下命令。
 
 ```powershell
 .\packaging\windows\build.ps1 -PythonEmbedZip C:\path\to\python-3.12.10-embed-amd64.zip
@@ -254,6 +254,7 @@ train(TrainingConfig(
 ├── main.py                     # 根目录便捷启动入口（无参数启动 Qt 界面，带参数转发至 CLI）
 ├── Dockerfile                  # YOLO Studio 基础运行镜像（含 PySide6/Qt 依赖、字体、onnx 工具）
 ├── requirements.txt            # 项目 Python 依赖声明
+├── models/                     # 本地基础权重目录（默认自动查找其中的 *.pt 模型）
 ├── scripts/                    # 启动脚本目录
 │   ├── run_gui.sh              # Linux Docker 一键启动脚本（挂载 X11、GPU 与 docker.sock）
 │   ├── run_gui.bat             # Windows Docker 启动脚本

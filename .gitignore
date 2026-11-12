@@ -11,6 +11,7 @@ wandb/
 *.log
 
 # 权重与大文件（建议不要直接推送到 GitHub）
+models/
 *.pt
 *.pth
 *.onnx

@@ -10,6 +10,8 @@ from threading import Event
 from typing import Any, Callable
 import math
 
+from .settings import resolve_model_path
+
 
 _APP_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd()
 os.environ.setdefault("YOLO_CONFIG_DIR", str(_APP_ROOT / "config"))
@@ -62,7 +64,7 @@ def train(config: TrainingConfig, stop_event: Event | None = None, metrics_callb
             torch = None  # type: ignore[assignment]
         if torch is not None and not torch.cuda.is_available():
             raise RuntimeError("未检测到可用 CUDA GPU。请将计算设备改为 cpu，或安装可用的 CUDA PyTorch。")
-    model = YOLO(config.model)
+    model = YOLO(resolve_model_path(config.model))
     if stop_event is not None:
         def stop_if_requested(_trainer) -> None:
             if stop_event.is_set():

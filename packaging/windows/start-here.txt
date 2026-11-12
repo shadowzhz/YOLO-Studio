@@ -2,7 +2,7 @@ YOLO Studio · Windows 64 位便携版
 
 1. 将整个 ZIP 解压到有写入权限的目录，例如桌面或文档。
 2. 打开解压后的 YOLO Studio 文件夹，双击 YOLO Studio.exe。
-3. 标注时选择自己的图片项目。模型验证可手动选择随包附带的 yolo11n.pt。
+3. 标注时选择自己的图片项目。模型验证可手动选择随包附带的 models\yolo11n.pt。
 
 包内带有 Python、CPU 版 PyTorch、YOLO11n 和 SAM 2.1 Tiny 权重。
 训练时使用 cpu 作为计算设备。MaixCAM 编译需要 Docker，部分导出格式需要各自的工具链。

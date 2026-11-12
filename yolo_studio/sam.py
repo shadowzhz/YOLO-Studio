@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
+from .settings import resolve_model_path
+
 _APP_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd()
 os.environ.setdefault("YOLO_CONFIG_DIR", str(_APP_ROOT / "config"))
 
@@ -17,7 +19,7 @@ class SamAnnotator:
             from ultralytics import SAM
         except ImportError as exc:
             raise RuntimeError("Install ultralytics first: python -m pip install ultralytics") from exc
-        self.model = SAM(model)
+        self.model = SAM(resolve_model_path(model))
 
     def segment(
         self,

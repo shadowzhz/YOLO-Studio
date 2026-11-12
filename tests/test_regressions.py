@@ -306,6 +306,22 @@ class RegressionTests(unittest.TestCase):
             root_main.main(["validate", "dataset"])
         cli_entry.assert_called_once_with()
 
+    def test_resolve_model_path_checks_models_dir(self):
+        from yolo_studio.settings import default_model_dialog_path, resolve_model_path
+
+        models_dir = self.root / "models"
+        models_dir.mkdir()
+        weight = models_dir / "custom.pt"
+        weight.write_bytes(b"pt")
+
+        with patch("pathlib.Path.cwd", return_value=self.root):
+            self.assertEqual(Path(resolve_model_path("custom.pt")), weight)
+            self.assertEqual(Path(default_model_dialog_path("custom.pt")), weight)
+            self.assertEqual(Path(default_model_dialog_path("missing.pt")), models_dir)
+            abs_missing = str(self.root / "missing_abs.pt")
+            self.assertEqual(resolve_model_path(abs_missing), abs_missing)
+            self.assertEqual(resolve_model_path("nonexistent_model_name_xyz.pt"), "nonexistent_model_name_xyz.pt")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .maixcam import MaixCamConfig, export_to_maixcam
+from .settings import resolve_model_path
 
 
 @dataclass(frozen=True)
@@ -27,9 +28,10 @@ class ExportConfig:
 
 def export_model(config: ExportConfig):
     """Export a PyTorch model using the format identifiers accepted by Ultralytics."""
+    resolved_model = resolve_model_path(config.model)
     if config.format.lower() in {"maixcam", "cvimodel"}:
         maix_cfg = MaixCamConfig(
-            model_path=config.model,
+            model_path=resolved_model,
             imgsz=config.imgsz,
             quantize=config.quantize,
             calib_dataset=config.calib_dataset,
@@ -51,4 +53,4 @@ def export_model(config: ExportConfig):
         kwargs["opset"] = config.opset
     if config.device and config.format in {"engine", "ncnn"}:
         kwargs["device"] = config.device
-    return YOLO(config.model).export(**kwargs)
+    return YOLO(resolved_model).export(**kwargs)

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from ..charts import TrainingChart
 from ..export import ExportConfig, export_model
+from ..settings import default_model_dialog_path
 from ..tasks import TASKS
 from ..training import TrainingConfig, TrainingStopped, detect_training_device, train
 from .helpers import _TrainingLogStream
@@ -323,13 +324,13 @@ class TrainingPage(QWidget):
 
     def choose_model(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
-            self, "选择模型", self.model.text(), "模型 (*.pt *.onnx *.engine);;所有文件 (*.*)"
+            self, "选择模型", default_model_dialog_path(self.model.text()), "模型 (*.pt *.onnx *.engine);;所有文件 (*.*)"
         )
         if selected:
             self.model.setText(selected)
 
     def choose_export_model(self) -> None:
-        initial_dir = self.export_model_path.text().strip() or self.model.text().strip() or "."
+        initial_dir = default_model_dialog_path(self.export_model_path.text().strip() or self.model.text().strip()) or "."
         selected, _ = QFileDialog.getOpenFileName(
             self, "选择待转换模型权重", initial_dir, "模型权重 (*.pt *.onnx);;所有文件 (*.*)"
         )

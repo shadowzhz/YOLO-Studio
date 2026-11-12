@@ -21,6 +21,14 @@ function Confirm-Hash {
     }
 }
 
+function Resolve-ModelFile {
+    param([string] $RepoRoot, [string] $Name)
+    foreach ($candidate in @((Join-Path $RepoRoot "models\$Name"), (Join-Path $RepoRoot $Name))) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return (Join-Path $RepoRoot "models\$Name")
+}
+
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $embedZip = (Resolve-Path -LiteralPath $PythonEmbedZip).Path
 Confirm-Hash $embedZip '4ACBED6DD1C744B0376E3B1CF57CE906F9DC9E95E68824584C8099A63025A3C3'
@@ -28,8 +36,11 @@ $models = @{
     'yolo11n.pt' = '0EBBC80D4A7680D14987A577CD21342B65ECFD94632BD9A8DA63AE6417644EE1'
     'sam2.1_t.pt' = '3C1E81CA9B037DD39D70A014DDB9A813D6C4C4E12555420DB7EAFF31689BD4E3'
 }
+$modelPaths = @{}
 foreach ($model in $models.Keys) {
-    Confirm-Hash (Join-Path $repo $model) $models[$model]
+    $modelPath = Resolve-ModelFile $repo $model
+    Confirm-Hash $modelPath $models[$model]
+    $modelPaths[$model] = $modelPath
 }
 
 if ((& gcc -dumpmachine) -ne 'x86_64-w64-mingw32') {
@@ -86,8 +97,10 @@ try {
     Copy-Item -LiteralPath (Join-Path $repo 'yolo_studio/assets') -Destination $app -Recurse
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'launch.py') -Destination $runtime
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'start-here.txt') -Destination (Join-Path $release 'START HERE.txt')
-    foreach ($model in $models.Keys) {
-        Copy-Item -LiteralPath (Join-Path $repo $model) -Destination $release
+    $releaseModels = Join-Path $release 'models'
+    New-Item -ItemType Directory -Path $releaseModels -Force | Out-Null
+    foreach ($model in $modelPaths.Keys) {
+        Copy-Item -LiteralPath $modelPaths[$model] -Destination $releaseModels
     }
 
     $icon = (Join-Path $app 'assets/app.ico').Replace('\', '/')

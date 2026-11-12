@@ -5,6 +5,51 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, fields
 import json
 from pathlib import Path
+import sys
+
+
+def resolve_model_path(model: str | Path) -> str:
+    """Resolve weight names or relative paths, checking ``models/`` when present."""
+    text = str(model).strip()
+    if not text:
+        return text
+    candidate = Path(text).expanduser()
+    if candidate.exists() or candidate.is_absolute():
+        return text
+    roots: list[Path] = [Path.cwd()]
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if exe_dir not in roots:
+            roots.append(exe_dir)
+    repo_root = Path(__file__).resolve().parent.parent
+    if repo_root not in roots:
+        roots.append(repo_root)
+    for root in roots:
+        for base in (root / "models", root):
+            option = base / candidate
+            if option.exists():
+                return str(option)
+    return text
+
+
+def default_model_dialog_path(model: str | Path) -> str:
+    """Return an existing model path or ``models/`` directory for file dialogs."""
+    resolved = resolve_model_path(model)
+    if resolved and Path(resolved).exists():
+        return resolved
+    roots: list[Path] = [Path.cwd()]
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if exe_dir not in roots:
+            roots.append(exe_dir)
+    repo_root = Path(__file__).resolve().parent.parent
+    if repo_root not in roots:
+        roots.append(repo_root)
+    for root in roots:
+        models_dir = root / "models"
+        if models_dir.is_dir():
+            return str(models_dir)
+    return str(model).strip()
 
 
 @dataclass
