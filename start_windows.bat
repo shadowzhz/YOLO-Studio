@@ -42,7 +42,7 @@ if %errorlevel% neq 0 (
 )
 
 echo [3/3] 正在启动主界面...
-python -m yolo_annotation_tool.qt_app
+python -m yolo_studio.qt_app
 
 if %errorlevel% neq 0 (
     echo.

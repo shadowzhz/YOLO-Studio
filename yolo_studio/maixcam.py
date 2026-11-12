@@ -63,6 +63,9 @@ def detect_model_info(model_path: str | Path) -> dict[str, Any]:
         raise FileNotFoundError(f"未找到模型权重文件：{model_path}")
 
     y = YOLO(str(model_path))
+    task = getattr(y, "task", None) or getattr(getattr(y, "model", None), "task", None)
+    if task and task != "detect":
+        raise ValueError(f"MaixCAM 当前仅支持目标检测模型 (detect)，暂不支持 {task} 任务模型")
     model_name = model_path.stem
     
     # Class names
@@ -123,26 +126,43 @@ def prune_and_clean_onnx(
     if not input_names:
         input_names = ["images"]
 
-    # Locate candidate outputs
+    # Locate candidate outputs, preferring nodes inside the final Detect head
+    head_prefix = f"/model.{detect_layer_idx}/"
+    head_dfl = None
+    head_sig = None
     dfl_out = None
     sigmoid_out = None
+    tensor_names = {i.name for i in m.graph.input}
 
     # Dynamic search by matching layer characteristics
     for node in m.graph.node:
+        for out in node.output:
+            tensor_names.add(out)
         name_lower = node.name.lower()
         if "dfl" in name_lower and node.op_type == "Conv" and node.output:
             dfl_out = node.output[0]
+            if node.name.startswith(head_prefix):
+                head_dfl = node.output[0]
         elif ("sigmoid" in name_lower or node.op_type == "Sigmoid") and node.output:
             # Look for the last Sigmoid in detection head
             sigmoid_out = node.output[0]
+            if node.name.startswith(head_prefix):
+                head_sig = node.output[0]
 
     # Defaults based on architecture if dynamic search failed
     default_dfl = f"/model.{detect_layer_idx}/dfl/conv/Conv_output_0"
     default_sig = f"/model.{detect_layer_idx}/Sigmoid_output_0"
 
-    chosen_dfl = dfl_out or default_dfl
-    chosen_sig = sigmoid_out or default_sig
+    chosen_dfl = head_dfl or dfl_out or default_dfl
+    chosen_sig = head_sig or sigmoid_out or default_sig
     output_names = [chosen_dfl, chosen_sig]
+
+    missing = [name for name in output_names if name not in tensor_names]
+    if missing:
+        raise RuntimeError(
+            f"未在 ONNX 图中找到预期检测头输出节点 {missing}。"
+            "MaixCAM 导出仅支持带 DFL/Sigmoid 检测头的 YOLOv8 / YOLO11 目标检测模型。"
+        )
 
     if log_fn:
         log_fn(f"[阶段 2] 提取后处理前级输出节点: {output_names}")
@@ -261,7 +281,7 @@ def generate_maixpy_script(
     model_type: str,
 ) -> None:
     """Generate an out-of-the-box runnable MaixPy test script."""
-    cls_name = "YOLO11" if model_type == "yolo11" else "YOLOv8"
+    cls_name = {"yolo11": "YOLO11", "yolov8": "YOLOv8", "yolov5": "YOLOv5"}.get(model_type, "YOLOv8")
     script = f'''"""MaixCAM 目标检测快速验证脚本 (MaixPy v4)"""
 from maix import app, camera, display, image, nn
 import os
@@ -395,6 +415,8 @@ def export_to_maixcam(config: MaixCamConfig) -> dict[str, Any]:
     # 1. Export static ONNX
     raw_onnx_name = f"{model_name}_raw.onnx"
     raw_onnx_path = staging_dir / raw_onnx_name
+    sibling_onnx = Path(config.model_path).resolve().with_suffix(".onnx")
+    pre_existing_onnx = sibling_onnx.exists()
     log(f"[阶段 1] 正在导出静态 ONNX 到: {raw_onnx_path.name} ...")
     
     # Ultralytics export
@@ -417,7 +439,10 @@ def export_to_maixcam(config: MaixCamConfig) -> dict[str, Any]:
 
     if not exported_file or not exported_file.exists():
         raise RuntimeError("Ultralytics ONNX 导出失败，未生成 .onnx 文件")
-    shutil.copy(exported_file, raw_onnx_path)
+    if exported_file.resolve() == sibling_onnx and not pre_existing_onnx and exported_file.resolve() != raw_onnx_path.resolve():
+        shutil.move(str(exported_file), str(raw_onnx_path))
+    else:
+        shutil.copy(exported_file, raw_onnx_path)
 
     # 2. Prune and Clean ONNX
     clean_onnx_path = staging_dir / f"{model_name}_clean.onnx"

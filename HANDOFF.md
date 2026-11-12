@@ -14,7 +14,11 @@
 - 训练曲线增加纵轴、轮次刻度及悬停数值，保持紧凑布局。
 
 ## 修改文件
-- `yolo_annotation_tool/qt_app.py`
+- `yolo_studio/qt_app.py` 及 `yolo_studio/ui/` 拆分模块
+- `yolo_studio/__main__.py`
+- `yolo_studio/maixcam.py`
+- `packaging/windows/build.ps1`
+- `tests/test_regressions.py`
 - `README.md`
 
 ## 验证

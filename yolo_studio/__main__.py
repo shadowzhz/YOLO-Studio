@@ -9,7 +9,7 @@ from .training import TrainingConfig, detect_training_device, train
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="yolo-annotation-tool")
+    parser = argparse.ArgumentParser(prog="yolo_studio")
     sub = parser.add_subparsers(dest="command", required=True)
 
     validate = sub.add_parser("validate", help="Validate a YOLO dataset")
@@ -41,10 +41,17 @@ def main() -> None:
 
     convert = sub.add_parser("export", help="Export a trained model")
     convert.add_argument("--model", required=True)
-    convert.add_argument("--format", choices=("onnx", "openvino", "engine", "ncnn"), default="onnx")
-    convert.add_argument("--imgsz", type=int, default=640)
+    convert.add_argument("--format", choices=("onnx", "openvino", "engine", "ncnn", "maixcam", "cvimodel"), default="onnx")
+    convert.add_argument("--imgsz", default=None, help="Input size (e.g. 640 or 224x320 for maixcam)")
     convert.add_argument("--opset", type=int, default=12)
+    convert.add_argument("--no-simplify", action="store_true", help="Disable ONNX graph simplification")
     convert.add_argument("--device", default=None)
+    convert.add_argument("--quantize", choices=("INT8", "BF16"), default="INT8", help="MaixCAM quantization mode")
+    convert.add_argument("--calib-dataset", default=None, help="Calibration image directory or data.yaml for MaixCAM INT8")
+    convert.add_argument("--calib-num", type=int, default=50, help="Max calibration images for MaixCAM INT8")
+    convert.add_argument("--output-dir", default=None, help="Output directory for MaixCAM export")
+    convert.add_argument("--docker-image", default="sophgo/tpuc_dev:latest", help="TPU-MLIR Docker image")
+    convert.add_argument("--chip", default="cv181x", help="Target Sophgo chip for MaixCAM")
 
     sub.add_parser("gui", help="Launch the lightweight Tkinter desktop UI")
     sub.add_parser("qt", help="Launch the PySide6 desktop UI module")
@@ -84,7 +91,31 @@ def main() -> None:
             )
         )
     elif args.command == "export":
-        result = export_model(ExportConfig(model=args.model, format=args.format, imgsz=args.imgsz, opset=args.opset, device=args.device))
+        is_maix = args.format in {"maixcam", "cvimodel"}
+        if args.imgsz is None:
+            imgsz: int | str | tuple[int, int] = (224, 320) if is_maix else 640
+        elif str(args.imgsz).strip().isdigit():
+            imgsz = int(str(args.imgsz).strip())
+        elif is_maix:
+            imgsz = str(args.imgsz).strip()
+        else:
+            parser.error("--imgsz must be an integer for non-MaixCAM formats")
+        result = export_model(
+            ExportConfig(
+                model=args.model,
+                format=args.format,
+                imgsz=imgsz,
+                opset=args.opset,
+                simplify=not args.no_simplify,
+                device=args.device,
+                quantize=args.quantize,
+                calib_dataset=args.calib_dataset,
+                calib_num=args.calib_num,
+                output_dir=args.output_dir,
+                docker_image=args.docker_image,
+                chip=args.chip,
+            )
+        )
         print(result)
     elif args.command == "gui":
         from .gui import main as gui_main
@@ -93,7 +124,7 @@ def main() -> None:
     else:
         # Running with runpy keeps the Qt module's own startup code intact and
         # avoids duplicating its large UI construction code in this CLI entrypoint.
-        runpy.run_module("yolo_annotation_tool.qt_app", run_name="__main__")
+        runpy.run_module("yolo_studio.qt_app", run_name="__main__")
 
 
 if __name__ == "__main__":

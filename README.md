@@ -34,14 +34,28 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # 启动 PySide6 完整界面
-python3 -m yolo_annotation_tool.qt_app
+python3 -m yolo_studio.qt_app
 ```
 
 ---
 
 ### 🪟 Windows 用户
 
-#### 推荐：原生一键启动（双击即跑）
+#### 便携发行包
+
+完整解压 `YOLO-Studio-Windows-x64.zip`，进入 `YOLO Studio` 文件夹，双击 `YOLO Studio.exe`。便携版自带 Python、CPU 版 PyTorch、YOLO11n 和 SAM 2.1 Tiny 权重。请解压到可写目录，配置、日志和默认运行输出会保存在解压目录。
+
+构建发行包需要 Windows x64 的 Python 3.12、MinGW-w64（`gcc` 和 `windres`）、Python 嵌入包以及 `yolo11n.pt` 和 `sam2.1_t.pt` 两个权重。[Python 3.12.10 x64 嵌入包](https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip) · [Ultralytics v8.4.0 权重](https://github.com/ultralytics/assets/releases/tag/v8.4.0)
+
+将两个权重放在项目根目录，运行以下命令。
+
+```powershell
+.\packaging\windows\build.ps1 -PythonEmbedZip C:\path\to\python-3.12.10-embed-amd64.zip
+```
+
+发行包默认输出到 `dist`。如已有依赖的 wheel 文件，可传入 `-Wheelhouse` 从本地安装。
+
+#### 从源码启动
 直接双击根目录下的 **`start_windows.bat`**。  
 脚本会自动创建虚拟环境、安装 `requirements.txt` 依赖并启动 PySide6 主程序。
 
@@ -142,23 +156,24 @@ python3 main.py
 
 ```bash
 # 1. 校验标注数据集
-python3 -m yolo_annotation_tool validate /path/to/dataset --classes 80
+python3 -m yolo_studio validate /path/to/dataset --classes 80
 
 # 2. 切分数据集为训练集与验证集并生成 data.yaml
-python3 -m yolo_annotation_tool split /path/to/dataset person car dog --val-fraction 0.2
+python3 -m yolo_studio split /path/to/dataset person car dog --val-fraction 0.2
 
 # 3. 启动模型训练
-python3 -m yolo_annotation_tool train --model yolo11n.pt --data data.yaml --epochs 100 --imgsz 640 --device 0
+python3 -m yolo_studio train --model yolo11n.pt --data data.yaml --epochs 100 --imgsz 640 --device 0
 
-# 4. 导出通用模型 (ONNX)
-python3 -m yolo_annotation_tool export --model best.pt --format onnx --imgsz 640
+# 4. 导出通用模型 (ONNX) 或 MaixCAM 部署包
+python3 -m yolo_studio export --model best.pt --format onnx --imgsz 640
+python3 -m yolo_studio export --model best.pt --format maixcam --imgsz 224x320 --quantize INT8 --calib-dataset data.yaml
 ```
 
 ### 2. Python API
 
 #### MaixCAM 一键转换与导出
 ```python
-from yolo_annotation_tool import ExportConfig, export_model
+from yolo_studio import ExportConfig, export_model
 
 output_dir = export_model(
     ExportConfig(
@@ -174,7 +189,7 @@ print(f"MaixCAM 部署包已生成至: {output_dir}")
 
 #### 模型训练与标注
 ```python
-from yolo_annotation_tool import TrainingConfig, train
+from yolo_studio import TrainingConfig, train
 
 # 训练模型
 train(TrainingConfig(
@@ -240,17 +255,29 @@ train(TrainingConfig(
 ├── run_gui.bat                 # Windows Docker 启动脚本
 ├── start_windows.bat           # Windows 原生 Python 虚拟环境一键安装启动
 ├── requirements.txt            # 项目 Python 依赖声明
-├── yolo_annotation_tool/       # 核心源码包
+├── yolo_studio/                # 核心源码包
 │   ├── __init__.py             # 顶层符号导出
 │   ├── __main__.py             # 统一 CLI 命令行入口
-│   ├── qt_app.py               # PySide6 现代全功能桌面端
+│   ├── qt_app.py               # PySide6 桌面端启动入口与兼容导出
+│   ├── ui/                     # PySide6 界面组件与页面模块
+│   │   ├── canvas.py           # 交互式标注画布（框/多边形/SAM/缩放平移）
+│   │   ├── capture_dialog.py   # 摄像头实时采集弹窗
+│   │   ├── annotation_page.py  # 标注管理页
+│   │   ├── training_page.py    # 训练与导出页
+│   │   ├── validation_page.py  # 模型推理验证页
+│   │   ├── settings_pages.py   # 软件配置、快捷键与关于页
+│   │   ├── themes.py           # 暗/亮双主题调色板与样式表
+│   │   └── main_window.py      # 主窗口与导航协调
 │   ├── gui.py                  # Tkinter 轻量应急桌面端
 │   ├── annotations.py          # YOLO 检测框与多边形标注序列化模型
+│   ├── capture.py              # 摄像头采集线程与防覆盖写图
+│   ├── charts.py               # 训练指标曲线控件
 │   ├── sam.py                  # SAM 2 交互式分割标注引擎
 │   ├── dataset.py              # 数据集规范校验、坏标清洗与 Train/Val 划分
 │   ├── training.py             # Ultralytics 模型训练封装与中断控制
 │   ├── export.py               # 多格式模型导出调度器
 │   ├── maixcam.py              # MaixCAM TPU 裁剪、量化与编译流水线
+│   ├── tasks.py                # 后台单线程串行任务队列与取消控制
 │   ├── settings.py             # 本地配置存储与管理
 │   └── assets/                 # 图标与界面矢量资源
 ├── examples/                   # 独立示例脚本与测试数据

@@ -40,7 +40,7 @@ if "%MODE%"=="tk" (
         -v "%cd%":/workspace ^
         -w /workspace ^
         yolo-tool:latest ^
-        python3 -m yolo_annotation_tool.gui
+        python3 -m yolo_studio.gui
 ) else if "%MODE%"=="bash" (
     echo 正在进入容器 Bash 终端...
     docker run -it --rm ^
@@ -60,7 +60,7 @@ if "%MODE%"=="tk" (
         -v "%cd%":/workspace ^
         -w /workspace ^
         yolo-tool:latest ^
-        python3 -m yolo_annotation_tool.qt_app
+        python3 -m yolo_studio.qt_app
 )
 
 if %errorlevel% neq 0 (

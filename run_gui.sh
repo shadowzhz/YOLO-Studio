@@ -11,7 +11,7 @@ export DISPLAY="${DISPLAY:-:0}"
 if ! command -v docker >/dev/null 2>&1; then
     echo "❌ [错误] 系统未安装 Docker 或 docker 命令不可用！"
     echo "   推荐改用原生 Python 运行方式："
-    echo "   python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m yolo_annotation_tool.qt_app"
+    echo "   python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m yolo_studio.qt_app"
     exit 1
 fi
 
@@ -83,7 +83,7 @@ if [ "$MODE" = "tk" ]; then
         -v "$PROJECT_DIR":/workspace \
         -w /workspace \
         yolo-tool:latest \
-        python3 -m yolo_annotation_tool.gui
+        python3 -m yolo_studio.gui
 elif [ "$MODE" = "bash" ]; then
     echo "💻 正在进入容器交互式 Bash 终端..."
     docker run -it --rm \
@@ -119,5 +119,5 @@ else
         -v "$PROJECT_DIR":/workspace \
         -w /workspace \
         yolo-tool:latest \
-        python3 -m yolo_annotation_tool.qt_app
+        python3 -m yolo_studio.qt_app
 fi
