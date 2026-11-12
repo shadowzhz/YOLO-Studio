@@ -1,12 +1,19 @@
-YOLO Studio · Windows 64 位便携版
+YOLO Studio · Windows 64 位便携全量版
 
-1. 将整个 ZIP 解压到有写入权限的目录，例如桌面或文档。
-2. 打开解压后的 YOLO Studio 文件夹，双击 YOLO Studio.exe。
-3. 标注时选择自己的图片项目。模型验证可手动选择随包附带的 models\yolo11n.pt。
+1. 将整个 ZIP 解压到任意目录（建议有写入权限，例如桌面或文档）。
+2. 打开解压后的 YOLO Studio 文件夹，双击 YOLO Studio.exe 启动图形界面。
+3. 如需命令行模式，可在终端执行：YOLO-Studio-CLI.cmd --help
+4. 标注时选择自己的图片项目；也可直接用随包附带的 examples\bus.jpg 和 models\yolo11n.pt 体验推理与标注。
 
-包内带有 Python、CPU 版 PyTorch、YOLO11n 和 SAM 2.1 Tiny 权重。
-训练时使用 cpu 作为计算设备。MaixCAM 编译需要 Docker，部分导出格式需要各自的工具链。
-应用配置和默认输出保存在解压目录中。启动异常时可查看同目录下的 launch.log。
+包内已自带：
+- Python 3.12 独立运行时与图形界面依赖（无需安装 Python 或 VC++ 运行库）
+- 支持 CUDA 12.8 的 PyTorch 全量包（有 NVIDIA 显卡且驱动 >= 525 自动启用 GPU 加速，无独显或旧驱动自动回退 CPU）
+- 预置模型权重：models\yolo11n.pt 与 models\sam2.1_t.pt
+
+注意事项：
+- MaixCAM (.cvimodel) 编译依赖 Docker；TensorRT (.engine) 等格式依赖对应引擎环境。
+- 目录可写时，配置、日志和默认输出保存在本目录；若放在只读目录（如 Program Files），配置与日志会自动保存在 %LOCALAPPDATA%\YOLO-Studio。
+- 启动异常时可查看 launch.log。
 
 第三方许可和声明保存在 runtime/LICENSE.txt 和各 Python 包的 .dist-info 目录中。
 模型权重来自 https://github.com/ultralytics/assets/releases/tag/v8.4.0 。

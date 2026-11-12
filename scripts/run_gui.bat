@@ -30,45 +30,47 @@ if %errorlevel% neq 0 (
     )
 )
 
+:: 探测是否支持 NVIDIA GPU 容器运行，不支持则自动回退到 CPU
+set GPU_FLAGS=
+set GPU_STATUS=未启用 (以 CPU 模式运行)
+docker run --rm --gpus all --entrypoint true yolo-tool:latest >nul 2>&1
+if %errorlevel% equ 0 (
+    set GPU_FLAGS=--gpus all
+    set GPU_STATUS=已启用 (All GPUs)
+)
+echo  GPU 加速: %GPU_STATUS%
+
+if "%DISPLAY%"=="" set DISPLAY=:0
+
 set MODE=%1
 if "%MODE%"=="" set MODE=qt
 
-if "%MODE%"=="tk" (
+set GUI_ARGS=-e DISPLAY=%DISPLAY% -v /tmp/.X11-unix:/tmp/.X11-unix:rw
+if /i "%MODE%"=="tk" (
     echo 正在启动 Tkinter 简化界面...
-    docker run -it --rm ^
-        --gpus all ^
-        -e DISPLAY=%DISPLAY% ^
-        -v /tmp/.X11-unix:/tmp/.X11-unix:rw ^
-        -v //var/run/docker.sock:/var/run/docker.sock ^
-        -v "%cd%":/workspace ^
-        -w /workspace ^
-        yolo-tool:latest ^
-        python3 -m yolo_studio.gui
-) else if "%MODE%"=="bash" (
+    set CMD_ARGS=python3 -m yolo_studio.gui
+) else if /i "%MODE%"=="bash" (
     echo 正在进入容器 Bash 终端...
-    docker run -it --rm ^
-        --gpus all ^
-        -v //var/run/docker.sock:/var/run/docker.sock ^
-        -v "%cd%":/workspace ^
-        -w /workspace ^
-        yolo-tool:latest ^
-        /bin/bash
+    set GUI_ARGS=
+    set CMD_ARGS=/bin/bash
 ) else (
     echo 正在启动 PySide6 完整界面...
-    docker run -it --rm ^
-        --gpus all ^
-        -e DISPLAY=%DISPLAY% ^
-        -v /tmp/.X11-unix:/tmp/.X11-unix:rw ^
-        -v //var/run/docker.sock:/var/run/docker.sock ^
-        -v "%cd%":/workspace ^
-        -w /workspace ^
-        yolo-tool:latest ^
-        python3 -m yolo_studio.qt_app
+    set CMD_ARGS=python3 -m yolo_studio.qt_app
 )
+
+docker run -it --rm ^
+    %GPU_FLAGS% ^
+    %GUI_ARGS% ^
+    -e HOST_WORKSPACE="%cd%" ^
+    -v //var/run/docker.sock:/var/run/docker.sock ^
+    -v "%cd%":/workspace ^
+    -w /workspace ^
+    yolo-tool:latest ^
+    %CMD_ARGS%
 
 if %errorlevel% neq 0 (
     echo.
-    echo [提示] 如果在 Windows 下图形界面无法弹出，推荐直接使用 scripts\start_windows.bat 原生运行。
+    echo [提示] 如果在 Windows 下图形界面无法弹出，推荐直接使用 scripts\start_windows.bat 原生运行或下载便携版。
     pause
 )
 popd

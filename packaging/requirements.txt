@@ -1,6 +1,6 @@
 ultralytics==8.4.210
-torch==2.15.0
-torchvision==0.29.2
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
 PySide6-Essentials==6.12.0
 onnx==1.23.2
 onnxruntime==1.25.1

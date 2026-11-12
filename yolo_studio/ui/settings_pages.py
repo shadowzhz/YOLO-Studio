@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
@@ -48,6 +49,7 @@ class SettingsPage(QWidget):
         self.annotation_fill = QCheckBox("标注线 + 内部填充")
         self.config_path = QLabel("本地配置文件：未初始化")
         self.config_path.setObjectName("configHint")
+        self.config_path.setWordWrap(True)
         self._build()
         self.theme.currentTextChanged.connect(self.theme_changed)
         self.show_guide_lines.toggled.connect(self._emit_display_settings)
@@ -58,12 +60,12 @@ class SettingsPage(QWidget):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 18, 22, 22)
+        layout.setContentsMargins(24, 18, 24, 22)
         layout.setSpacing(12)
 
         title = QLabel("软件配置")
         title.setObjectName("configTitle")
-        subtitle = QLabel("界面主题和本地使用设置会保存在当前工具目录。")
+        subtitle = QLabel("修改会立即在界面生效；点击“保存”或关闭软件时自动写入本地配置文件。")
         subtitle.setObjectName("configSubTitle")
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -75,7 +77,7 @@ class SettingsPage(QWidget):
         guide_form.addRow("作用范围", QLabel("仅在图片区域内显示"))
         columns.addWidget(guide_card, 1)
 
-        view_card, view_form = self._make_card("视图")
+        view_card, view_form = self._make_card("视图与主题")
         view_form.addRow("界面主题", self.theme)
         view_form.addRow("缩放步进", self.zoom_step)
         view_form.addRow(self.keep_zoom)
@@ -90,8 +92,8 @@ class SettingsPage(QWidget):
         display_columns.addWidget(annotation_card, 1)
 
         storage_card, storage_form = self._make_card("本地保存")
-        storage_form.addRow("保存方式", QLabel("关闭软件时自动保存"))
-        storage_form.addRow("项目记录", QLabel("记住最近打开的项目目录"))
+        storage_form.addRow("持久化", QLabel("点击保存或退出时写入磁盘"))
+        storage_form.addRow("项目记录", QLabel("自动记忆最近打开的项目与权重路径"))
         display_columns.addWidget(storage_card, 1)
         layout.addLayout(display_columns)
 
@@ -103,7 +105,7 @@ class SettingsPage(QWidget):
         actions = QHBoxLayout()
         reset = QPushButton("恢复本页默认")
         reset.clicked.connect(self._reset_defaults)
-        save = QPushButton("保存")
+        save = QPushButton("保存配置")
         save.setObjectName("primaryButton")
         save.clicked.connect(self.save_requested)
         actions.addStretch(1)
@@ -182,11 +184,11 @@ class ShortcutSettingsPage(QWidget):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 18, 22, 22)
+        layout.setContentsMargins(24, 18, 24, 22)
         layout.setSpacing(12)
         title = QLabel("快捷键设置")
         title.setObjectName("shortcutTitle")
-        subtitle = QLabel("点击输入框后直接按键录入。图片切换快捷键仅在画布区域生效。")
+        subtitle = QLabel("点击输入框后直接按键录入。图片切换快捷键仅在画布聚焦时生效，避免影响文本输入。")
         subtitle.setObjectName("shortcutSubTitle")
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -196,7 +198,7 @@ class ShortcutSettingsPage(QWidget):
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(14, 13, 14, 14)
         card_layout.setSpacing(9)
-        section = QLabel("标注操作")
+        section = QLabel("自定义快捷键")
         section.setObjectName("shortcutSectionTitle")
         card_layout.addWidget(section)
         form = QFormLayout()
@@ -209,12 +211,49 @@ class ShortcutSettingsPage(QWidget):
         form.addRow("保存标注", self.save_annotation)
         card_layout.addLayout(form)
         layout.addWidget(card)
+
+        # Built-in Canvas Cheatsheet Card
+        guide_card = QFrame()
+        guide_card.setObjectName("shortcutCard")
+        guide_layout = QVBoxLayout(guide_card)
+        guide_layout.setContentsMargins(14, 13, 14, 14)
+        guide_layout.setSpacing(10)
+        guide_title = QLabel("画布内置快捷键速查")
+        guide_title.setObjectName("shortcutSectionTitle")
+        guide_layout.addWidget(guide_title)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(8)
+        shortcuts_info = (
+            ("1 ~ 9", "快速切换第 1~9 个类别"),
+            ("Ctrl + Z / Ctrl + Y", "撤销 / 重做（SAM 模式下撤销点）"),
+            ("Delete / Backspace", "删除选中标注 / 撤销 SAM 选点"),
+            ("↑ ↓ ← →", "微调当前选中标注的位置"),
+            ("鼠标滚轮", "以光标为中心缩放画布"),
+            ("中键 / Alt + 左键", "任意模式下拖动画布平移"),
+            ("多边形：右键 / 双击", "闭合当前多边形轮廓"),
+            ("多边形：Ctrl + 左键", "选中并拖动整个多边形"),
+        )
+        for idx, (keys, desc) in enumerate(shortcuts_info):
+            row = idx // 2
+            col = (idx % 2) * 2
+            badge = QLabel(keys)
+            badge.setObjectName("shortcutKeyBadge")
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            desc_lbl = QLabel(desc)
+            grid.addWidget(badge, row, col)
+            grid.addWidget(desc_lbl, row, col + 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        guide_layout.addLayout(grid)
+        layout.addWidget(guide_card)
         layout.addStretch(1)
 
         actions = QHBoxLayout()
-        reset = QPushButton("恢复默认")
+        reset = QPushButton("恢复默认并保存")
         reset.clicked.connect(self._reset_defaults)
-        save = QPushButton("保存")
+        save = QPushButton("保存快捷键")
         save.setObjectName("primaryButton")
         save.clicked.connect(self._save)
         actions.addStretch(1)
@@ -242,6 +281,7 @@ class ShortcutSettingsPage(QWidget):
         self.previous_image.setKeySequence(QKeySequence("A"))
         self.next_image.setKeySequence(QKeySequence("D"))
         self.save_annotation.setKeySequence(QKeySequence.StandardKey.Save)
+        self._save()
 
     def _save(self) -> None:
         values = self.values()
@@ -259,12 +299,12 @@ class AboutPage(QWidget):
         self._config_dir = config_dir if config_dir is not None else Path.cwd() / "config"
         self.setObjectName("aboutPage")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 18, 22, 22)
+        layout.setContentsMargins(24, 18, 24, 22)
         layout.setSpacing(12)
 
         title = QLabel("关于软件")
         title.setObjectName("aboutTitle")
-        subtitle = QLabel("YOLO Studio")
+        subtitle = QLabel("一站式 YOLO 检测、分割标注、训练与端侧部署工作台")
         subtitle.setObjectName("aboutSubTitle")
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -272,17 +312,19 @@ class AboutPage(QWidget):
         card = QFrame()
         card.setObjectName("aboutCard")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(18, 18, 18, 18)
-        card_layout.setSpacing(12)
+        card_layout.setContentsMargins(20, 20, 20, 20)
+        card_layout.setSpacing(14)
         identity = QHBoxLayout()
+        identity.setSpacing(14)
         icon = QLabel()
         icon.setPixmap(QIcon(str(ASSETS_DIR / "app.svg")).pixmap(56, 56))
         icon.setFixedSize(60, 60)
         identity.addWidget(icon)
         name_column = QVBoxLayout()
+        name_column.setSpacing(4)
         name = QLabel("YOLO Studio")
         name.setObjectName("aboutName")
-        mode = QLabel("本地运行模式")
+        mode = QLabel("● 本地离线工作台模式")
         mode.setObjectName("aboutMode")
         name_column.addWidget(name)
         name_column.addWidget(mode)
@@ -290,7 +332,18 @@ class AboutPage(QWidget):
         identity.addLayout(name_column, 1)
         card_layout.addLayout(identity)
 
-        capabilities = QLabel("图片项目管理、YOLO 矩形框与分割标注、SAM 点选、模型训练、模型验证和快捷键配置")
+        tags_row = QHBoxLayout()
+        tags_row.setSpacing(8)
+        for tag_text in ("YOLO 矩形框 & 多边形", "SAM 2 点选分割", "ONNX / TensorRT / OpenVINO", "MaixCAM SG2002 TPU"):
+            tag = QLabel(tag_text)
+            tag.setObjectName("capabilityTag")
+            tags_row.addWidget(tag)
+        tags_row.addStretch(1)
+        card_layout.addLayout(tags_row)
+
+        capabilities = QLabel(
+            "覆盖图片采集、交互标注、数据集质检切分、本地训练监控、实时摄像头推理验证以及多引擎量化导出全流程。"
+        )
         capabilities.setObjectName("aboutText")
         capabilities.setWordWrap(True)
         card_layout.addWidget(capabilities)

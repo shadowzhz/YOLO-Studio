@@ -1,8 +1,8 @@
 param(
-    [Parameter(Mandatory = $true)]
     [string] $PythonEmbedZip,
     [string] $Python = 'python',
     [string] $Wheelhouse,
+    [string] $TorchIndexUrl = 'https://download.pytorch.org/whl/cu128',
     [string] $OutputZip = (Join-Path $PSScriptRoot '../../dist/YOLO-Studio-Windows-x64.zip')
 )
 
@@ -21,6 +21,17 @@ function Confirm-Hash {
     }
 }
 
+function Get-VerifiedFile {
+    param([string] $TargetPath, [string] $Url, [string] $ExpectedHash)
+    if (-not (Test-Path -LiteralPath $TargetPath)) {
+        New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($TargetPath)) -Force | Out-Null
+        Write-Host "Downloading $Url -> $TargetPath"
+        Invoke-WebRequest -Uri $Url -OutFile $TargetPath -UseBasicParsing
+    }
+    Confirm-Hash $TargetPath $ExpectedHash
+    return (Resolve-Path -LiteralPath $TargetPath).Path
+}
+
 function Resolve-ModelFile {
     param([string] $RepoRoot, [string] $Name)
     foreach ($candidate in @((Join-Path $RepoRoot "models\$Name"), (Join-Path $RepoRoot $Name))) {
@@ -30,17 +41,23 @@ function Resolve-ModelFile {
 }
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$embedZip = (Resolve-Path -LiteralPath $PythonEmbedZip).Path
-Confirm-Hash $embedZip '4ACBED6DD1C744B0376E3B1CF57CE906F9DC9E95E68824584C8099A63025A3C3'
+$embedExpectedHash = '4ACBED6DD1C744B0376E3B1CF57CE906F9DC9E95E68824584C8099A63025A3C3'
+$embedUrl = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip'
+
 $models = @{
-    'yolo11n.pt' = '0EBBC80D4A7680D14987A577CD21342B65ECFD94632BD9A8DA63AE6417644EE1'
-    'sam2.1_t.pt' = '3C1E81CA9B037DD39D70A014DDB9A813D6C4C4E12555420DB7EAFF31689BD4E3'
+    'yolo11n.pt' = @{
+        Hash = '0EBBC80D4A7680D14987A577CD21342B65ECFD94632BD9A8DA63AE6417644EE1'
+        Url  = 'https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n.pt'
+    }
+    'sam2.1_t.pt' = @{
+        Hash = '3C1E81CA9B037DD39D70A014DDB9A813D6C4C4E12555420DB7EAFF31689BD4E3'
+        Url  = 'https://github.com/ultralytics/assets/releases/download/v8.4.0/sam2.1_t.pt'
+    }
 }
 $modelPaths = @{}
 foreach ($model in $models.Keys) {
     $modelPath = Resolve-ModelFile $repo $model
-    Confirm-Hash $modelPath $models[$model]
-    $modelPaths[$model] = $modelPath
+    $modelPaths[$model] = Get-VerifiedFile -TargetPath $modelPath -Url $models[$model].Url -ExpectedHash $models[$model].Hash
 }
 
 if ((& gcc -dumpmachine) -ne 'x86_64-w64-mingw32') {
@@ -61,15 +78,22 @@ $pendingZip = Join-Path $outputDir ('.yolo-studio-' + [guid]::NewGuid().ToString
 
 try {
     New-Item -ItemType Directory -Path $runtime, $app, $sitePackages -Force | Out-Null
+    $embedTarget = if ($PythonEmbedZip) { $PythonEmbedZip } else { Join-Path $stage 'python-3.12.10-embed-amd64.zip' }
+    $embedZip = Get-VerifiedFile -TargetPath $embedTarget -Url $embedUrl -ExpectedHash $embedExpectedHash
     Expand-Archive -LiteralPath $embedZip -DestinationPath $runtime -Force
     Set-Content -LiteralPath (Join-Path $runtime 'python312._pth') -Encoding ASCII -Value @(
         'python312.zip', '.', 'Lib\site-packages', '..\app', 'import site'
     )
 
+    $sharedReqs = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../requirements.txt')).Path
+    $sharedLaunch = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../launch.py')).Path
+
     $pipArgs = @('-m', 'pip', '--isolated', 'install', '--disable-pip-version-check', '--no-compile', '--only-binary=:all:',
-        '--target', $sitePackages, '-r', (Join-Path $PSScriptRoot 'requirements.txt'))
+        '--target', $sitePackages, '-r', $sharedReqs)
     if ($Wheelhouse) {
         $pipArgs += @('--no-index', '--find-links', (Resolve-Path -LiteralPath $Wheelhouse).Path)
+    } elseif ($TorchIndexUrl) {
+        $pipArgs += @('--extra-index-url', $TorchIndexUrl)
     }
     Invoke-Tool $Python $pipArgs
 
@@ -95,12 +119,26 @@ try {
         Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
     }
     Copy-Item -LiteralPath (Join-Path $repo 'yolo_studio/assets') -Destination $app -Recurse
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'launch.py') -Destination $runtime
+    Copy-Item -LiteralPath $sharedLaunch -Destination (Join-Path $runtime 'launch.py')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'start-here.txt') -Destination (Join-Path $release 'START HERE.txt')
+    Set-Content -LiteralPath (Join-Path $release 'YOLO-Studio-CLI.cmd') -Encoding ASCII -Value @(
+        '@echo off',
+        '"%~dp0runtime\python.exe" -I -B -X utf8 "%~dp0runtime\launch.py" %*'
+    )
+
     $releaseModels = Join-Path $release 'models'
     New-Item -ItemType Directory -Path $releaseModels -Force | Out-Null
     foreach ($model in $modelPaths.Keys) {
         Copy-Item -LiteralPath $modelPaths[$model] -Destination $releaseModels
+    }
+
+    $examplesSource = Join-Path $repo 'examples'
+    if (Test-Path -LiteralPath $examplesSource) {
+        $releaseExamples = Join-Path $release 'examples'
+        New-Item -ItemType Directory -Path $releaseExamples -Force | Out-Null
+        Get-ChildItem -LiteralPath $examplesSource -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $releaseExamples -Force
+        }
     }
 
     $icon = (Join-Path $app 'assets/app.ico').Replace('\', '/')
@@ -111,7 +149,9 @@ try {
     Invoke-Tool 'gcc' @('-O2', '-municode', '-mwindows', '-static-libgcc', '-finput-charset=UTF-8',
         (Join-Path $PSScriptRoot 'launcher.c'), $resourceObject, '-o', (Join-Path $release 'YOLO Studio.exe'))
 
-    Invoke-Tool (Join-Path $runtime 'python.exe') @('-I', '-B', '-c', 'import sys; from importlib.metadata import version; print(sys.version); print(version(''torch''), version(''PySide6-Essentials''))')
+    $smoke = 'import sys; from importlib.metadata import version; import torch, torchvision, ultralytics, PySide6.QtWidgets, onnx, onnxruntime, onnxsim, onnxslim, yaml, yolo_studio; print(sys.version); print(version(''torch''), version(''PySide6-Essentials''), ''cuda_built='', torch.version.cuda)'
+    Invoke-Tool (Join-Path $runtime 'python.exe') @('-I', '-B', '-c', $smoke)
+    Invoke-Tool (Join-Path $runtime 'python.exe') @('-I', '-B', '-X', 'utf8', (Join-Path $runtime 'launch.py'), '--help')
     Invoke-Tool 'tar.exe' @('-a', '-cf', $pendingZip, '-C', $stage, 'YOLO Studio')
     Move-Item -LiteralPath $pendingZip -Destination $output -Force
     Get-Item -LiteralPath $output

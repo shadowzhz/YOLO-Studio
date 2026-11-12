@@ -1,0 +1,23 @@
+YOLO Studio · Linux x86_64 便携全量版
+
+1. 将整个压缩包解压到任意可写目录（例如 ~/Apps/YOLO-Studio）。
+2. 在终端执行 ./YOLO-Studio 或在文件管理器中运行它，即可启动图形界面。
+3. 如需添加到桌面应用菜单，可执行 ./install-desktop.sh。
+4. 如需命令行模式，可执行 ./YOLO-Studio --help。
+5. 标注时选择自己的图片项目；也可直接用随包附带的 examples/bus.jpg 和 models/yolo11n.pt 体验推理与标注。
+
+包内已自带：
+- 独立 Python 3.12 运行时（无需宿主机安装 Python / pip / conda）
+- 支持 CUDA 12.8 的 PyTorch 全量包（有 NVIDIA 显卡且驱动 >= 525 自动启用 GPU 加速，无独显或旧驱动自动回退 CPU）
+- 预置模型权重：models/yolo11n.pt 与 models/sam2.1_t.pt
+- 常见缺失的 Qt6 XCB 支持库与内置中文字体（无需额外配置中文环境）
+
+适用系统：
+- x86_64 桌面 Linux（glibc >= 2.34，如 Ubuntu 22.04+、Debian 12+、Fedora 35+ 等）。
+
+注意事项：
+- MaixCAM (.cvimodel) 编译依赖 Docker；TensorRT (.engine) 等格式依赖对应引擎环境。
+- 目录可写时，配置、日志和默认输出保存在本目录；若放在只读目录（如 /opt），配置与日志会自动保存在 ~/.local/share/yolo-studio。
+- 启动异常时可查看 launch.log。
+
+模型权重来自 https://github.com/ultralytics/assets/releases/tag/v8.4.0 。

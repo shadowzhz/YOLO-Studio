@@ -19,14 +19,32 @@
 
 ### 🐧 Linux 用户
 
-#### 推荐：Docker 一键运行（免配环境，自动挂载 GPU 与 Docker 编译套接字）
+#### 方式一：便携全量包（零环境开箱即用，推荐）
+解压 `YOLO-Studio-Linux-x86_64.tar.gz` 后进入 `YOLO-Studio` 目录，直接运行：
+```bash
+./YOLO-Studio
+```
+- 便携版内置独立 Python 3.12、PySide6、CUDA 12.8 PyTorch（有 NVIDIA 显卡且驱动 >= 525 自动 GPU 加速，无独显或旧驱动自动回退 CPU）、`YOLO11n` 与 `SAM 2.1 Tiny` 权重、`examples/bus.jpg` 测试图、Qt6 XCB 支持库与中文字体，适用于主流 x86_64 桌面 Linux（glibc >= 2.34，如 Ubuntu 22.04+、Debian 12+、Fedora 35+）。
+- 创建应用菜单快捷方式：`./install-desktop.sh`
+- 命令行模式：`./YOLO-Studio --help`
+
+构建 Linux 便携包（建议在安装有 `libxcb-cursor0` 等 XCB 运行库及 `fonts-wqy-microhei` 的 Ubuntu 22.04+ 环境或容器内执行）：
+```bash
+bash packaging/linux/build.sh
+```
+> 若在 Windows / 其他系统通过 Docker 构建 Linux 便携包：
+> ```bash
+> docker run --rm -v "$PWD":/workspace -w /workspace ubuntu:22.04 bash -c "apt-get update && apt-get install -y curl ca-certificates libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-xinput0 libxkbcommon-x11-0 fonts-wqy-microhei && bash packaging/linux/build.sh"
+> ```
+
+#### 方式二：Docker 一键运行（免配环境，自动挂载 GPU 与 Docker 编译套接字）
 ```bash
 ./scripts/run_gui.sh
 ```
 - 启动轻量 Tkinter 界面：`./scripts/run_gui.sh tk`
 - 进入容器终端：`./scripts/run_gui.sh bash`
 
-#### 原生 Python 运行
+#### 方式三：原生 Python 运行
 ```bash
 # 建议使用 Python 3.10 ~ 3.12
 python3 -m venv venv
@@ -42,19 +60,17 @@ python3 main.py
 
 ### 🪟 Windows 用户
 
-#### 便携发行包
+#### 便携全量发行包（零环境开箱即用，推荐）
 
-完整解压 `YOLO-Studio-Windows-x64.zip`，进入 `YOLO Studio` 文件夹，双击 `YOLO Studio.exe`。便携版自带 Python、CPU 版 PyTorch、YOLO11n 和 SAM 2.1 Tiny 权重。请解压到可写目录，配置、日志和默认运行输出会保存在解压目录。
+完整解压 `YOLO-Studio-Windows-x64.zip`，进入 `YOLO Studio` 文件夹，双击 `YOLO Studio.exe`（命令行可用 `YOLO-Studio-CLI.cmd`）。便携版自带 Python 3.12、支持 CUDA 12.8 的 PyTorch（有兼容 NVIDIA 显卡且驱动 >= 525 自动启用 GPU 加速，无独显自动回退 CPU）、YOLO11n 和 SAM 2.1 Tiny 权重以及 `examples\bus.jpg` 测试图。解压到可写目录时，配置、日志和默认运行输出保存在解压目录；若位于只读目录则自动保存在 `%LOCALAPPDATA%\YOLO-Studio`。
 
-构建发行包需要 Windows x64 的 Python 3.12、MinGW-w64（`gcc` 和 `windres`）、Python 嵌入包以及 `yolo11n.pt` 和 `sam2.1_t.pt` 两个权重。[Python 3.12.10 x64 嵌入包](https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip) · [Ultralytics v8.4.0 权重](https://github.com/ultralytics/assets/releases/tag/v8.4.0)
-
-将两个权重放在项目 `models/` 目录（或根目录），运行以下命令。
+构建发行包需要 Windows x64 的 Python 3.12 和 MinGW-w64（`gcc` 和 `windres`）。若未提前下载嵌入式 Python 或模型权重，构建脚本会自动下载并校验 SHA-256；也可手动传入 `-PythonEmbedZip` 或 `-Wheelhouse` 进行离线构建：
 
 ```powershell
-.\packaging\windows\build.ps1 -PythonEmbedZip C:\path\to\python-3.12.10-embed-amd64.zip
+.\packaging\windows\build.ps1
 ```
 
-发行包默认输出到 `dist`。如已有依赖的 wheel 文件，可传入 `-Wheelhouse` 从本地安装。
+发行包默认输出到 `dist`。如已有离线包文件，可传入 `-PythonEmbedZip` 和 `-Wheelhouse` 从本地安装。
 
 #### 从源码启动
 - 直接双击 **`scripts\start_windows.bat`**（自动创建虚拟环境并安装依赖）。
@@ -255,6 +271,11 @@ train(TrainingConfig(
 ├── Dockerfile                  # YOLO Studio 基础运行镜像（含 PySide6/Qt 依赖、字体、onnx 工具）
 ├── requirements.txt            # 项目 Python 依赖声明
 ├── models/                     # 本地基础权重目录（默认自动查找其中的 *.pt 模型）
+├── packaging/                  # Windows 与 Linux 零环境便携打包脚本与统一启动器
+│   ├── launch.py               # 便携版跨平台入口（支持可写/只读目录回退与 CLI 转发）
+│   ├── requirements.txt        # 便携全量版固定依赖（含 CUDA 12.8 PyTorch）
+│   ├── windows/build.ps1       # Windows x64 便携 ZIP 构建脚本
+│   └── linux/build.sh          # Linux x86_64 便携 tar.gz 构建脚本
 ├── scripts/                    # 启动脚本目录
 │   ├── run_gui.sh              # Linux Docker 一键启动脚本（挂载 X11、GPU 与 docker.sock）
 │   ├── run_gui.bat             # Windows Docker 启动脚本

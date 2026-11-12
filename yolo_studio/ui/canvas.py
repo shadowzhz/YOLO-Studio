@@ -5,30 +5,38 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QLabel
 
 from ..annotations import Annotation, Detection, Polygon
 
 
+def _contrast_text_color(bg_hex: str) -> QColor:
+    c = QColor(bg_hex)
+    luminance = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+    return QColor("#0f172a") if luminance > 162 else QColor("#ffffff")
+
+
 class ImageCanvas(QLabel):
-    """A compact rectangle and polygon annotation canvas that reads and writes YOLO labels."""
+    """Interactive rectangle, polygon, and SAM point annotation canvas."""
 
     changed = Signal()
     sam_point_added = Signal(float, float, int)
     view_changed = Signal(float)
     selection_changed = Signal(int)
+    class_hotkey_pressed = Signal(int)
 
     def __init__(self) -> None:
-        super().__init__("请先打开图片目录")
+        super().__init__("请先打开项目目录，或点击左侧图片开始标注")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
-        self.setMinimumSize(480, 360)
-        self.setStyleSheet("background: #090b10; color: #94a3b8;")
+        self.setMinimumSize(420, 340)
+        self._dark_mode = True
         self._image = QPixmap()
         self._annotations: list[Annotation] = []
+        self._class_names: list[str] = ["目标"]
         self._class_id = 0
         self._mode = "detect"
         self._start = None
@@ -55,8 +63,20 @@ class ImageCanvas(QLabel):
         self._undo_stack: list[tuple[list[Annotation], list[tuple[float, float]], int | None]] = []
         self._redo_stack: list[tuple[list[Annotation], list[tuple[float, float]], int | None]] = []
 
+    def set_dark_mode(self, dark: bool) -> None:
+        self._dark_mode = dark
+        self.update()
+
     def set_class_id(self, class_id: int) -> None:
         self._class_id = class_id
+
+    def set_class_names(self, names: list[str]) -> None:
+        self._class_names = list(names) if names else ["目标"]
+        self.update()
+
+    def set_show_guide_lines(self, enabled: bool) -> None:
+        self._show_guide_lines = bool(enabled)
+        self.update()
 
     def set_display_settings(
         self,
@@ -76,8 +96,16 @@ class ImageCanvas(QLabel):
 
     @staticmethod
     def _class_color(class_id: int) -> str:
-        palette = ("#52c41a", "#409eff", "#faad14", "#9254de", "#13c2c2", "#eb2f96", "#fa541c", "#2f54eb")
+        palette = ("#22c55e", "#3b82f6", "#f59e0b", "#a855f7", "#06b6d4", "#ec4899", "#f97316", "#6366f1")
         return palette[class_id % len(palette)]
+
+    def _class_display_label(self, class_id: int) -> str:
+        if 0 <= class_id < len(self._class_names):
+            name = self._class_names[class_id]
+        else:
+            name = f"类别 {class_id}"
+        text = f"{class_id}: {name}"
+        return text if len(text) <= 18 else text[:17] + "…"
 
     def set_mode(self, mode: str) -> None:
         self._mode = mode
@@ -100,7 +128,7 @@ class ImageCanvas(QLabel):
     def set_image(self, image_path: Path, annotations: list[Annotation]) -> None:
         self._polygon_draft.clear()
         self._pan_start = None
-        self._image = QPixmap(str(image_path))
+        self._image = QPixmap(str(image_path)) if str(image_path) else QPixmap()
         self._annotations = annotations
         self._start = None
         self._draft = None
@@ -135,6 +163,19 @@ class ImageCanvas(QLabel):
         self._selected_index = index if 0 <= index < len(self._annotations) else None
         self.selection_changed.emit(self._selected_index if self._selected_index is not None else -1)
         self.update()
+
+    def update_selected_class(self, class_id: int) -> bool:
+        item = self.selected_annotation
+        if item is None or item.class_id == class_id:
+            return False
+        self._record_change()
+        if isinstance(item, Detection):
+            self._annotations[self._selected_index] = replace(item, class_id=class_id)
+        else:
+            self._annotations[self._selected_index] = Polygon(class_id, item.points)
+        self.changed.emit()
+        self.update()
+        return True
 
     def nudge_selected(self, dx: float, dy: float) -> bool:
         item = self.selected_annotation
@@ -214,8 +255,26 @@ class ImageCanvas(QLabel):
         self.view_changed.emit(self._zoom)
         self.update()
 
-    def _set_zoom(self, zoom: float) -> None:
-        self._zoom = max(0.2, min(zoom, 8.0))
+    def zoom_in(self) -> None:
+        factor = 1 + self._zoom_step_percent / 100
+        self._set_zoom(self._zoom * factor)
+
+    def zoom_out(self) -> None:
+        factor = 1 + self._zoom_step_percent / 100
+        self._set_zoom(self._zoom / factor)
+
+    def _set_zoom(self, zoom: float, anchor: QPointF | None = None) -> None:
+        old_zoom = self._zoom
+        new_zoom = max(0.2, min(zoom, 8.0))
+        if new_zoom == old_zoom:
+            return
+        if anchor is not None and not self._image.isNull():
+            ratio = new_zoom / old_zoom
+            cx = anchor.x() - self.width() / 2.0
+            cy = anchor.y() - self.height() / 2.0
+            self._pan_x = cx * (1.0 - ratio) + self._pan_x * ratio
+            self._pan_y = cy * (1.0 - ratio) + self._pan_y * ratio
+        self._zoom = new_zoom
         self.view_changed.emit(self._zoom)
         self.update()
 
@@ -311,64 +370,126 @@ class ImageCanvas(QLabel):
             return x, y
         return None
 
+    def _draw_badge(self, painter: QPainter, anchor_x: float, anchor_y: float, text: str, bg_hex: str, canvas_rect: QRectF) -> None:
+        font = QFont(self.font())
+        font.setPointSizeF(8.5)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        pad_x = 6
+        pill_w = fm.horizontalAdvance(text) + pad_x * 2
+        pill_h = fm.height() + 4
+        bx = max(canvas_rect.left(), min(anchor_x, canvas_rect.right() - pill_w))
+        by = anchor_y - pill_h - 2
+        if by < canvas_rect.top():
+            by = anchor_y + 2
+        pill = QRectF(bx, by, pill_w, pill_h)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(bg_hex))
+        painter.drawRoundedRect(pill, 4, 4)
+        painter.setPen(_contrast_text_color(bg_hex))
+        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#161b22"))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = QColor("#0b0e14") if self._dark_mode else QColor("#e9eef5")
+        painter.fillRect(self.rect(), bg)
         area = self._draw_rect()
         if not area:
-            painter.setPen(QColor("#c9d1d9"))
+            painter.setPen(QColor("#94a3b8") if self._dark_mode else QColor("#64748b"))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
             return
-        left, top, width, height, _ = area
-        painter.drawPixmap(int(left), int(top), int(width), int(height), self._image)
+
+        left, top, width, height, scale = area
+        if scale < 2.5:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        image_rect = QRectF(left, top, width, height)
+        painter.drawPixmap(image_rect.toRect(), self._image)
+        frame_pen = QPen(QColor(255, 255, 255, 34) if self._dark_mode else QColor(15, 23, 42, 48), 1)
+        painter.setPen(frame_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(image_rect)
+
         for index, item in enumerate(self._annotations):
-            color = "#f0883e" if index == self._selected_index else self._class_color(item.class_id)
-            painter.setPen(QPen(QColor(color), self._annotation_line_width + (1 if index == self._selected_index else 0)))
-            fill = QColor(color)
-            fill.setAlpha(40)
-            painter.setBrush(fill if self._annotation_fill_enabled else Qt.BrushStyle.NoBrush)
+            selected = index == self._selected_index
+            base_hex = self._class_color(item.class_id)
+            stroke_hex = "#fbbf24" if selected else base_hex
+            stroke_w = self._annotation_line_width + (1 if selected else 0)
+            painter.setPen(QPen(QColor(stroke_hex), stroke_w))
+            fill = QColor(stroke_hex)
+            fill.setAlpha(48 if selected else 38)
+            painter.setBrush(fill if (self._annotation_fill_enabled or selected) else Qt.BrushStyle.NoBrush)
+            label_text = self._class_display_label(item.class_id)
             if isinstance(item, Detection):
                 x = left + (item.x_center - item.width / 2) * width
                 y = top + (item.y_center - item.height / 2) * height
-                painter.drawRect(int(x), int(y), int(item.width * width), int(item.height * height))
-                painter.drawText(int(x) + 3, int(y) + 16, str(item.class_id))
+                w = item.width * width
+                h = item.height * height
+                painter.drawRect(QRectF(x, y, w, h))
+                self._draw_badge(painter, x, y, label_text, stroke_hex, image_rect)
             else:
                 points = [(left + x * width, top + y * height) for x, y in item.points]
-                painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in points]))
+                painter.drawPolygon(QPolygonF([QPointF(px, py) for px, py in points]))
                 if points:
-                    painter.drawText(int(points[0][0]) + 3, int(points[0][1]) + 16, str(item.class_id))
+                    self._draw_badge(painter, points[0][0], points[0][1], label_text, stroke_hex, image_rect)
+
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if self._show_guide_lines and self._guide_position is not None:
             guide_x, guide_y = self._guide_position
             if left <= guide_x <= left + width and top <= guide_y <= top + height:
-                painter.setPen(QPen(QColor(64, 158, 255, 170), 1, Qt.PenStyle.DashLine))
-                painter.drawLine(int(left), int(guide_y), int(left + width), int(guide_y))
-                painter.drawLine(int(guide_x), int(top), int(guide_x), int(top + height))
+                painter.setPen(QPen(QColor(96, 165, 250, 175), 1, Qt.PenStyle.DashLine))
+                painter.drawLine(QPointF(left, guide_y), QPointF(left + width, guide_y))
+                painter.drawLine(QPointF(guide_x, top), QPointF(guide_x, top + height))
+
         if self._polygon_draft:
-            painter.setPen(QPen(QColor("#58a6ff"), 2, Qt.PenStyle.DashLine))
-            points = [(left + x * width, top + y * height) for x, y in self._polygon_draft]
+            points = [QPointF(left + x * width, top + y * height) for x, y in self._polygon_draft]
+            painter.setPen(QPen(QColor("#60a5fa"), 2, Qt.PenStyle.SolidLine))
             for first, second in zip(points, points[1:]):
-                painter.drawLine(int(first[0]), int(first[1]), int(second[0]), int(second[1]))
+                painter.drawLine(first, second)
+            if self._guide_position is not None:
+                gx, gy = self._guide_position
+                if left <= gx <= left + width and top <= gy <= top + height:
+                    painter.setPen(QPen(QColor("#93c5fd"), 1.5, Qt.PenStyle.DashLine))
+                    painter.drawLine(points[-1], QPointF(gx, gy))
+            for idx, pt in enumerate(points):
+                is_first = idx == 0 and len(points) >= 3
+                painter.setPen(QPen(QColor("#ffffff"), 1.5))
+                painter.setBrush(QColor("#22c55e" if is_first else "#3b82f6"))
+                painter.drawEllipse(pt, 5.0 if is_first else 3.5, 5.0 if is_first else 3.5)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
         if self._sam_points:
             for index, (x, y) in enumerate(self._sam_points):
                 color = "#22c55e" if self._sam_labels[index] == 1 else "#ef4444"
-                painter.setPen(QPen(QColor(color), 3))
-                painter.drawEllipse(int(left + x * width - 5), int(top + y * height - 5), 10, 10)
+                pt = QPointF(left + x * width, top + y * height)
+                painter.setPen(QPen(QColor("#ffffff"), 1.5))
+                painter.setBrush(QColor(color))
+                painter.drawEllipse(pt, 5.5, 5.5)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
         if self._selected_index is not None and 0 <= self._selected_index < len(self._annotations):
             selected = self._annotations[self._selected_index]
             painter.setBrush(QColor("#ffffff"))
-            painter.setPen(QPen(QColor("#58a6ff"), 2))
+            painter.setPen(QPen(QColor("#3b82f6"), 2))
             if isinstance(selected, Detection):
                 for hx, hy in self._box_handles(selected).values():
-                    painter.drawRect(int(left + hx * width - 4), int(top + hy * height - 4), 8, 8)
+                    painter.drawRect(QRectF(left + hx * width - 4, top + hy * height - 4, 8, 8))
             elif isinstance(selected, Polygon):
                 for x, y in selected.points:
-                    painter.drawEllipse(int(left + x * width - 4), int(top + y * height - 4), 8, 8)
+                    painter.drawEllipse(QPointF(left + x * width, top + y * height), 4.2, 4.2)
             painter.setBrush(Qt.BrushStyle.NoBrush)
+
         if self._draft:
             x1, y1, x2, y2 = self._draft
-            painter.setPen(QPen(QColor("#58a6ff"), 2, Qt.PenStyle.DashLine))
-            painter.drawRect(int(min(x1, x2)), int(min(y1, y2)), int(abs(x2 - x1)), int(abs(y2 - y1)))
+            rect = QRectF(min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+            painter.setPen(QPen(QColor("#60a5fa"), 2, Qt.PenStyle.DashLine))
+            painter.setBrush(QColor(59, 130, 246, 28))
+            painter.drawRect(rect)
+            if scale > 0:
+                pw = round(rect.width() / scale)
+                ph = round(rect.height() / scale)
+                self._draw_badge(painter, rect.left(), rect.top(), f"{pw} × {ph} px", "#2563eb", self.rect())
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -447,7 +568,7 @@ class ImageCanvas(QLabel):
             self._draft = (self._start.x(), self._start.y(), self._start.x(), self._start.y())
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._show_guide_lines:
+        if self._show_guide_lines or self._polygon_draft:
             self._guide_position = (event.position().x(), event.position().y())
         if self._drag_handle:
             point = self._image_pos(event.position(), clamp=True)
@@ -524,7 +645,7 @@ class ImageCanvas(QLabel):
             self.update()
         else:
             self._update_hover_cursor(event.position())
-            if self._show_guide_lines:
+            if self._show_guide_lines or self._polygon_draft:
                 self.update()
 
     def _update_hover_cursor(self, pos) -> None:
@@ -592,9 +713,9 @@ class ImageCanvas(QLabel):
     def wheelEvent(self, event) -> None:  # noqa: N802
         factor = 1 + self._zoom_step_percent / 100
         if event.angleDelta().y() > 0:
-            self._set_zoom(self._zoom * factor)
+            self._set_zoom(self._zoom * factor, anchor=event.position())
         elif event.angleDelta().y() < 0:
-            self._set_zoom(self._zoom / factor)
+            self._set_zoom(self._zoom / factor, anchor=event.position())
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
@@ -627,6 +748,10 @@ class ImageCanvas(QLabel):
             return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_Y:
             self.redo()
+            event.accept()
+            return
+        if event.modifiers() == Qt.KeyboardModifier.NoModifier and Qt.Key.Key_1 <= event.key() <= Qt.Key.Key_9:
+            self.class_hotkey_pressed.emit(event.key() - Qt.Key.Key_1)
             event.accept()
             return
         nudge = {

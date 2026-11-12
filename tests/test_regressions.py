@@ -12,7 +12,7 @@ from unittest.mock import patch
 import yaml
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QImage, QMouseEvent
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QFrame, QMessageBox
 
 from yolo_studio.__main__ import main as cli_main
 from yolo_studio.annotations import Detection, load_annotations
@@ -321,6 +321,154 @@ class RegressionTests(unittest.TestCase):
             abs_missing = str(self.root / "missing_abs.pt")
             self.assertEqual(resolve_model_path(abs_missing), abs_missing)
             self.assertEqual(resolve_model_path("nonexistent_model_name_xyz.pt"), "nonexistent_model_name_xyz.pt")
+
+    def test_theme_tokens_and_vector_icons(self):
+        from yolo_studio.ui import ASSETS_DIR
+        from yolo_studio.ui.icons import vector_icon
+        from yolo_studio.ui.themes import build_theme_stylesheet
+
+        dark_qss = build_theme_stylesheet(True, ASSETS_DIR)
+        light_qss = build_theme_stylesheet(False, ASSETS_DIR)
+        self.assertIn("#0f1117", dark_qss)
+        self.assertIn("#f8fafc", light_qss)
+        self.assertNotIn("QToolBar", dark_qss)
+
+        for name in ("annotate", "train", "validate", "settings", "shortcuts", "about", "box", "polygon", "spark"):
+            ico = vector_icon(name, "#cbd5e1", active_color="#ffffff")
+            self.assertFalse(ico.pixmap(18, 18).isNull())
+
+    def test_canvas_relabel_undo_and_cursor_zoom(self):
+        from PySide6.QtGui import QWheelEvent
+
+        self.page.class_names.setText("bus,person")
+        self.page.save_classes()
+        self.page.select_image(0)
+        self.page.canvas.resize(400, 400)
+        self.page.canvas._annotations = [Detection(0, 0.5, 0.5, 0.2, 0.2)]
+        self.page.canvas.select_annotation(0)
+        self.page.class_combo.setCurrentIndex(1)
+        self.page.apply_class_to_selected()
+        self.assertEqual(self.page.canvas.annotations[0].class_id, 1)
+        self.page.canvas.undo()
+        self.assertEqual(self.page.canvas.annotations[0].class_id, 0)
+
+        # Zoom anchored away from widget center should shift pan to keep cursor location anchored.
+        wheel = QWheelEvent(
+            QPointF(300, 100),
+            QPointF(300, 100),
+            QPointF(0, 0).toPoint(),
+            QPointF(0, 120).toPoint(),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        self.page.canvas.wheelEvent(wheel)
+        self.assertGreater(self.page.canvas._zoom, 1.0)
+        self.assertNotEqual((self.page.canvas._pan_x, self.page.canvas._pan_y), (0.0, 0.0))
+
+    def test_annotation_mode_sync_and_progress(self):
+        self.page.resize(1100, 720)
+        self.page.show()
+        self.app.processEvents()
+        ctx = self.page.findChild(QFrame, "classifyBar")
+        detect_min_w = ctx.minimumSizeHint().width()
+        detect_canvas_w = self.page.canvas.width()
+
+        self.page._mode_buttons["segment"].click()
+        self.assertEqual(self.page.mode_combo.currentData(), "segment")
+        self.assertTrue(self.page.rail_mode_buttons["segment"].isChecked())
+        self.assertEqual(self.page.dataset_progress.maximum(), 2)
+
+        self.page._mode_buttons["sam"].click()
+        self.app.processEvents()
+        self.assertTrue(self.page.sam_panel.isVisibleTo(self.page))
+        self.assertEqual(ctx.minimumSizeHint().width(), detect_min_w)
+        self.assertEqual(self.page.canvas.width(), detect_canvas_w)
+        self.page.hide()
+
+    def test_training_kpis_and_validation_pager(self):
+        t = TrainingPage()
+        t._target_epochs = 10
+        t.progress_bar.setRange(0, 10)
+        t._add_metrics({"epoch": 3, "map50_box": 0.625, "map50_mask": None, "train_loss": 1.25})
+        self.assertEqual(t.progress_bar.value(), 3)
+        self.assertEqual(t.kpi_epoch_value.text(), "3 / 10")
+        self.assertEqual(t.kpi_map_value.text(), "0.6250")
+        self.assertEqual(t.kpi_loss_value.text(), "1.2500")
+
+        v = ValidationPage()
+        img_a = self.root / "images" / "a.png"
+        img_b = self.root / "images" / "b.png"
+        v._set_output_images([str(img_a), str(img_b)])
+        self.assertEqual(v._output_index, 0)
+        self.assertIn("1 / 2", v.result_page_label.text())
+        v._step_output(1)
+        self.assertEqual(v._output_index, 1)
+        self.assertIn("2 / 2", v.result_page_label.text())
+
+    def test_main_window_sidebar_collapse_and_theme_switch(self):
+        with patch("pathlib.Path.cwd", return_value=self.root):
+            window = MainWindow()
+            try:
+                expanded_w = window.sidebar.width()
+                window._toggle_sidebar()
+                self.assertLess(window.sidebar.width(), expanded_w)
+                self.assertEqual(window.navigation_list.item(0).text(), "")
+                self.assertEqual(window.navigation_list.item(0).toolTip(), "标注管理")
+                window.apply_theme("浅色")
+                self.assertFalse(window._resolved_dark)
+                window.apply_theme("深色")
+                self.assertTrue(window._resolved_dark)
+                window._set_status_message("SAM 测试消息")
+                self.assertEqual(window.status_message_label.text(), "SAM 测试消息")
+                self.assertEqual(window.statusBar().currentMessage(), "")
+            finally:
+                window._task_badge_timer.stop()
+                window.annotation._sam_timer.stop()
+                window.close()
+
+    def test_portable_settings_and_launcher_paths(self):
+        import importlib.util
+
+        from yolo_studio.settings import SettingsStore, default_model_dialog_path, resolve_model_path
+
+        launch_path = Path(__file__).resolve().parent.parent / "packaging" / "launch.py"
+        spec = importlib.util.spec_from_file_location("portable_launch", launch_path)
+        portable_launch = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(portable_launch)
+
+        bundle = self.root / "bundle"
+        (bundle / "models").mkdir(parents=True)
+        weight = bundle / "models" / "portable_test.pt"
+        weight.write_bytes(b"pt")
+        config_dir = self.root / "user_cfg"
+        other_cwd = self.root / "empty_cwd"
+        other_cwd.mkdir()
+
+        with patch("pathlib.Path.cwd", return_value=other_cwd):
+            with patch.dict(
+                os.environ,
+                {"YOLO_STUDIO_HOME": str(bundle), "YOLO_STUDIO_CONFIG_DIR": str(config_dir)},
+                clear=False,
+            ):
+                self.assertEqual(Path(resolve_model_path("portable_test.pt")), weight)
+                self.assertEqual(Path(default_model_dialog_path("missing.pt")), bundle / "models")
+                self.assertEqual(SettingsStore().path, config_dir / "app_settings.json")
+
+        with patch.object(portable_launch, "_is_writable_dir", return_value=False):
+            with patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "local_app"), "XDG_DATA_HOME": str(self.root / "xdg_data")}, clear=False):
+                fallback = portable_launch._writable_data_dir(bundle)
+                self.assertTrue(fallback.is_dir())
+                self.assertNotEqual(fallback, bundle)
+
+        with patch("yolo_studio.__main__.main") as cli_main:
+            with patch.dict(os.environ, {}, clear=False):
+                portable_launch.main(["validate", str(self.root)])
+                self.assertTrue(os.environ["YOLO_AUTOINSTALL"] == "false")
+                self.assertTrue(os.environ["YOLO_STUDIO_CONFIG_DIR"].endswith("config"))
+        cli_main.assert_called_once_with()
 
 
 if __name__ == "__main__":

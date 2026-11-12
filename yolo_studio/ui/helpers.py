@@ -2,11 +2,68 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import sys
 
 from PySide6.QtCore import QEvent, QObject, QTranslator
 from PySide6.QtWidgets import QComboBox
+
+
+def discover_camera_devices() -> list[tuple[str, int]]:
+    """Enumerate available camera devices across Linux V4L2 and QtMultimedia."""
+    valid_cameras: list[tuple[str, int]] = []
+    sys_video = Path("/sys/class/video4linux")
+    if sys_video.exists():
+        for p in sorted(sys_video.glob("video*"), key=lambda x: int(x.name[5:]) if x.name[5:].isdigit() else 999):
+            num_str = p.name[5:]
+            if not num_str.isdigit():
+                continue
+            dev_idx = int(num_str)
+            idx_file = p / "index"
+            name_file = p / "name"
+            if idx_file.exists() and idx_file.read_text().strip() not in {"", "0"}:
+                continue
+            hw_name = name_file.read_text().strip() if name_file.exists() else ""
+            hw_name = hw_name.split(":")[0].strip()
+            label = f"摄像头 {dev_idx} ({hw_name})" if hw_name else f"摄像头 {dev_idx}"
+            valid_cameras.append((label, dev_idx))
+    else:
+        try:
+            from PySide6.QtMultimedia import QMediaDevices
+
+            for dev_idx, device in enumerate(QMediaDevices.videoInputs()):
+                desc = device.description().strip()
+                label = f"摄像头 {dev_idx} ({desc})" if desc else f"摄像头 {dev_idx}"
+                valid_cameras.append((label, dev_idx))
+        except Exception:
+            pass
+    if not valid_cameras:
+        valid_cameras = [("摄像头 0 (默认主摄)", 0), ("摄像头 1 (外接设备)", 1)]
+    return valid_cameras
+
+
+def populate_camera_combo(combo: QComboBox) -> None:
+    """Populate a QComboBox with discovered camera devices."""
+    combo.clear()
+    for label, idx in discover_camera_devices():
+        combo.addItem(label, idx)
+
+
+def parse_camera_source(combo: QComboBox) -> int | str:
+    """Extract camera device index or stream source from a camera QComboBox."""
+    idx = combo.currentIndex()
+    if idx >= 0 and combo.itemText(idx) == combo.currentText():
+        cam_data = combo.itemData(idx)
+        if cam_data is not None and str(cam_data) != "":
+            return cam_data
+    cam_text = combo.currentText().strip()
+    match = re.search(r"摄像头\s*(\d+)", cam_text)
+    if match:
+        return int(match.group(1))
+    if cam_text.isdigit():
+        return int(cam_text)
+    return cam_text or 0
 
 
 class _FileDialogTranslator(QTranslator):

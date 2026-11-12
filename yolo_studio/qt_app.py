@@ -8,7 +8,7 @@ import sys
 
 try:
     from PySide6.QtCore import QLibraryInfo
-    from PySide6.QtGui import QFont
+    from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtWidgets import QApplication
 except ImportError as exc:  # pragma: no cover - depends on local desktop runtime
     raise RuntimeError("Install the desktop extra: python -m pip install PySide6") from exc
@@ -62,11 +62,36 @@ def _relaunch_with_cuda_runtime() -> None:
     os.execv(str(target), [str(target), "-m", "yolo_studio.qt_app", *sys.argv[1:]])
 
 
+def _register_bundled_fonts() -> None:
+    """Register bundled CJK/UI fonts so minimal Linux desktops render text cleanly."""
+    candidates: list[Path] = []
+    env_fonts = os.environ.get("YOLO_STUDIO_FONTS_DIR", "").strip()
+    if env_fonts:
+        candidates.append(Path(env_fonts).expanduser())
+    bundle_root = Path(__file__).resolve().parent.parent
+    if bundle_root.name == "app":
+        candidates.append(bundle_root.parent / "runtime" / "fonts")
+    candidates.append(ASSETS_DIR / "fonts")
+    seen: set[Path] = set()
+    for folder in candidates:
+        try:
+            resolved = folder.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        for font_file in sorted(resolved.iterdir()):
+            if font_file.is_file() and font_file.suffix.lower() in {".ttf", ".ttc", ".otf"}:
+                QFontDatabase.addApplicationFont(str(font_file))
+
+
 def main() -> None:
     if getattr(sys, "frozen", False):
         os.chdir(Path(sys.executable).resolve().parent)
     _relaunch_with_cuda_runtime()
     app = QApplication([])
+    _register_bundled_fonts()
     # Qt's built-in dialogs need their own translations even when application
     # strings are already Chinese (including in a C.UTF-8 Docker locale).
     translator = _FileDialogTranslator(app)

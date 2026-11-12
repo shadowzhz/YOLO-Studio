@@ -27,7 +27,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     python3-tk \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 PySide6 桌面 GUI 框架
-RUN pip install --no-cache-dir PySide6 onnx onnxsim
+# 安装 PySide6 桌面 GUI 框架及 ONNX 导出依赖
+RUN pip install --no-cache-dir PySide6 onnx onnxruntime onnxsim onnxslim
 
 WORKDIR /workspace

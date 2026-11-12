@@ -6,16 +6,19 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QTextEdit,
@@ -41,21 +44,45 @@ class TrainingPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._stop_event = Event()
+        self._target_epochs = 100
+        self._best_map50: float | None = None
+        self._last_save_dir: Path | None = None
+
         self.model = QLineEdit("yolo11n.pt")
         self.data = QLineEdit("data.yaml")
         self.epochs = QLineEdit("100")
         self.imgsz = QLineEdit("640")
         self.batch = QLineEdit("-1")
+        self.batch.setPlaceholderText("-1 自动匹配显存")
+        self.batch.setToolTip("单批次样本数；填写 -1 时由系统根据显存自动推断")
         self.patience = QLineEdit("30")
+        self.patience.setToolTip("连续多少轮验证指标无提升则提前停止训练（0 表示禁用早停）")
         self.workers = QLineEdit("0")
+        self.workers.setPlaceholderText("Windows 推荐 0")
+        self.workers.setToolTip("数据加载子进程数；Windows 原生环境建议保持 0")
         self.device = QLineEdit(detect_training_device())
+        self.device.setPlaceholderText("cpu 或 0")
         self.device.setToolTip("无 NVIDIA CUDA 显卡时填写 cpu；有可用 NVIDIA GPU 时可填写 0。")
         self.project = QLineEdit("runs/train")
         self.name = QLineEdit("experiment")
         self.start = QPushButton("开始训练")
         self.start.setObjectName("primaryButton")
         self.stop = QPushButton("停止训练")
+        self.stop.setObjectName("dangerButton")
         self.stop.setEnabled(False)
+        self.open_output_btn = QPushButton("打开结果目录")
+        self.open_output_btn.setToolTip("在文件管理器中打开训练输出目录")
+        self.open_output_btn.clicked.connect(self.open_output_folder)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("等待开始训练")
+
+        self.kpi_epoch_value = QLabel("—")
+        self.kpi_map_value = QLabel("—")
+        self.kpi_loss_value = QLabel("—")
+
         self.export_model_path = QLineEdit()
         self.export_model_path.setPlaceholderText("留空默认使用上方模型，或点击右侧浏览指定待导出的权重 (如 best.pt)")
         self.export_model_browse = QPushButton("浏览")
@@ -87,15 +114,16 @@ class TrainingPage(QWidget):
         self.export_simplify.addItem("启用", True)
         self.export_simplify.addItem("关闭", False)
         self.export_button = QPushButton("导出模型")
+        self.export_button.setObjectName("primaryButton")
         self.log = QTextEdit()
         self.log.setObjectName("taskLog")
         self.log.setReadOnly(True)
-        self.log.setMinimumHeight(200)
+        self.log.setMinimumHeight(190)
         self.model_browse = QPushButton("浏览")
         self.data_browse = QPushButton("浏览")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 18, 24, 18)
+        layout.setContentsMargins(22, 16, 22, 18)
         layout.setSpacing(12)
         title = QLabel("模型训练与导出")
         title.setObjectName("pageTitle")
@@ -136,8 +164,31 @@ class TrainingPage(QWidget):
         training_buttons.setSpacing(8)
         training_buttons.addWidget(self.start)
         training_buttons.addWidget(self.stop)
+        training_buttons.addWidget(self.progress_bar, 1)
+        training_buttons.addWidget(self.open_output_btn)
         training_form.addLayout(training_buttons, 6, 0, 1, 4)
         layout.addWidget(training_card)
+
+        # KPI Strip
+        kpi_row = QHBoxLayout()
+        kpi_row.setSpacing(10)
+        for label_text, value_label in (
+            ("当前轮次", self.kpi_epoch_value),
+            ("最佳 mAP50", self.kpi_map_value),
+            ("最新训练 Loss", self.kpi_loss_value),
+        ):
+            card = QFrame()
+            card.setObjectName("kpiCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 8, 12, 8)
+            card_layout.setSpacing(2)
+            lbl = QLabel(label_text)
+            lbl.setObjectName("kpiLabel")
+            value_label.setObjectName("kpiValue")
+            card_layout.addWidget(lbl)
+            card_layout.addWidget(value_label)
+            kpi_row.addWidget(card, 1)
+        layout.addLayout(kpi_row)
 
         charts = QHBoxLayout()
         charts.setSpacing(12)
@@ -147,17 +198,17 @@ class TrainingPage(QWidget):
             fixed_max=1.0,
         )
         self.loss_chart = TrainingChart("训练总 Loss（各项之和）", (("train_loss", "训练", "#f97316"),))
-        for chart_title, chart in (("mAP50", self.map_chart), ("Loss", self.loss_chart)):
+        for chart_title, chart in (("mAP50 趋势", self.map_chart), ("Loss 趋势", self.loss_chart)):
             card = QGroupBox(chart_title)
             card.setObjectName("trainingCard")
             chart_layout = QVBoxLayout(card)
-            chart_layout.setContentsMargins(8, 8, 8, 8)
+            chart_layout.setContentsMargins(8, 10, 8, 8)
             chart_layout.addWidget(chart)
             charts.addWidget(card, 1)
         layout.addLayout(charts)
         self.metrics_ready.connect(self._add_metrics)
 
-        export_toggle = QPushButton("展开模型转换")
+        export_toggle = QPushButton("展开模型转换与端侧部署 (ONNX / MaixCAM / TensorRT)")
         export_toggle.setCheckable(True)
         layout.addWidget(export_toggle)
         export_card = QGroupBox("模型转换")
@@ -240,10 +291,14 @@ class TrainingPage(QWidget):
         export_form.addWidget(self.export_button, 5, 0, 1, 4)
         export_card.hide()
         export_toggle.toggled.connect(export_card.setVisible)
-        export_toggle.toggled.connect(lambda expanded: export_toggle.setText("收起模型转换" if expanded else "展开模型转换"))
+        export_toggle.toggled.connect(
+            lambda expanded: export_toggle.setText(
+                "收起模型转换" if expanded else "展开模型转换与端侧部署 (ONNX / MaixCAM / TensorRT)"
+            )
+        )
         layout.addWidget(export_card)
 
-        log_card = QGroupBox("训练日志")
+        log_card = QGroupBox("训练与导出日志")
         log_card.setObjectName("trainingLogCard")
         log_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.log.setObjectName("trainingLogEdit")
@@ -267,22 +322,57 @@ class TrainingPage(QWidget):
         self.status_changed.connect(self.log_message)
         self._on_export_format_changed()
 
+    def set_dark_mode(self, dark: bool) -> None:
+        self.map_chart.set_dark_mode(dark)
+        self.loss_chart.set_dark_mode(dark)
+
+    def open_output_folder(self) -> None:
+        target = self._last_save_dir
+        if target is None or not target.exists():
+            candidate = Path(self.project.text().strip() or "runs/train")
+            target = candidate if candidate.exists() else candidate.parent
+        target.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.resolve())))
+
     def _on_training_finished(self) -> None:
         self.start.setEnabled(True)
         self.export_button.setEnabled(True)
         self.stop.setEnabled(False)
+        if self.progress_bar.maximum() > 0 and self.progress_bar.value() >= self.progress_bar.maximum():
+            self.progress_bar.setFormat("训练完成 (%v / %m 轮)")
+        elif self.progress_bar.value() == 0:
+            self.progress_bar.setFormat("已结束")
 
     def _on_export_finished(self) -> None:
         self.export_button.setEnabled(True)
         self.start.setEnabled(True)
 
     def _add_metrics(self, metrics: object) -> None:
-        if isinstance(metrics, dict):
-            self.map_chart.add_point(metrics)
-            self.loss_chart.add_point(metrics)
+        if not isinstance(metrics, dict):
+            return
+        self.map_chart.add_point(metrics)
+        self.loss_chart.add_point(metrics)
+        epoch = int(metrics.get("epoch") or 0)
+        if epoch > 0:
+            self.progress_bar.setValue(min(epoch, self.progress_bar.maximum()))
+            self.progress_bar.setFormat(f"第 {epoch} / {self._target_epochs} 轮 (%p%)")
+            self.kpi_epoch_value.setText(f"{epoch} / {self._target_epochs}")
+        candidates = [metrics.get("map50_box"), metrics.get("map50_mask")]
+        valid_maps = [float(v) for v in candidates if v is not None]
+        if valid_maps:
+            current_map = max(valid_maps)
+            if self._best_map50 is None or current_map > self._best_map50:
+                self._best_map50 = current_map
+            self.kpi_map_value.setText(f"{self._best_map50:.4f}")
+        loss = metrics.get("train_loss")
+        if loss is not None:
+            self.kpi_loss_value.setText(f"{float(loss):.4f}")
 
     def _on_model_trained_internal(self, model_path: str) -> None:
         self.export_model_path.setText(model_path)
+        p = Path(model_path)
+        if p.parent.name == "weights":
+            self._last_save_dir = p.parent.parent
 
     def log_message(self, message: str) -> None:
         self.log.append(message)
@@ -378,6 +468,14 @@ class TrainingPage(QWidget):
             project=self.project.text(),
             name=self.name.text(),
         )
+        self._target_epochs = epochs
+        self._best_map50 = None
+        self.progress_bar.setRange(0, epochs)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat(f"准备训练 (0 / {epochs} 轮)")
+        self.kpi_epoch_value.setText(f"0 / {epochs}")
+        self.kpi_map_value.setText("—")
+        self.kpi_loss_value.setText("—")
         self.start.setEnabled(False)
         self.export_button.setEnabled(False)
         self.stop.setEnabled(True)
@@ -456,6 +554,7 @@ class TrainingPage(QWidget):
             stream.flush()
             output_dir = getattr(result, "save_dir", None)
             if output_dir:
+                self._last_save_dir = Path(output_dir)
                 self.status_changed.emit(f"训练完成，结果目录：{output_dir}")
                 best_pt = Path(output_dir) / "weights" / "best.pt"
                 last_pt = Path(output_dir) / "weights" / "last.pt"
@@ -487,6 +586,7 @@ class TrainingPage(QWidget):
     def _export_work(self, config: ExportConfig) -> None:
         try:
             output = export_model(config)
+            self._last_save_dir = Path(output).parent
             self.status_changed.emit(f"模型导出完成：{output}")
         except Exception as exc:
             self.status_changed.emit(f"模型导出失败：{exc}")

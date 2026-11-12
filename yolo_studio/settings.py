@@ -4,8 +4,29 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 import json
+import os
 from pathlib import Path
 import sys
+
+
+def _app_roots() -> list[Path]:
+    """Return candidate application roots for locating bundled assets and weights."""
+    roots: list[Path] = [Path.cwd()]
+    env_home = os.environ.get("YOLO_STUDIO_HOME", "").strip()
+    if env_home:
+        home_path = Path(env_home).expanduser()
+        if home_path not in roots:
+            roots.append(home_path)
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if exe_dir not in roots:
+            roots.append(exe_dir)
+    repo_root = Path(__file__).resolve().parent.parent
+    if repo_root not in roots:
+        roots.append(repo_root)
+    if repo_root.name == "app" and repo_root.parent not in roots:
+        roots.append(repo_root.parent)
+    return roots
 
 
 def resolve_model_path(model: str | Path) -> str:
@@ -16,15 +37,7 @@ def resolve_model_path(model: str | Path) -> str:
     candidate = Path(text).expanduser()
     if candidate.exists() or candidate.is_absolute():
         return text
-    roots: list[Path] = [Path.cwd()]
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        if exe_dir not in roots:
-            roots.append(exe_dir)
-    repo_root = Path(__file__).resolve().parent.parent
-    if repo_root not in roots:
-        roots.append(repo_root)
-    for root in roots:
+    for root in _app_roots():
         for base in (root / "models", root):
             option = base / candidate
             if option.exists():
@@ -37,15 +50,7 @@ def default_model_dialog_path(model: str | Path) -> str:
     resolved = resolve_model_path(model)
     if resolved and Path(resolved).exists():
         return resolved
-    roots: list[Path] = [Path.cwd()]
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        if exe_dir not in roots:
-            roots.append(exe_dir)
-    repo_root = Path(__file__).resolve().parent.parent
-    if repo_root not in roots:
-        roots.append(repo_root)
-    for root in roots:
+    for root in _app_roots():
         models_dir = root / "models"
         if models_dir.is_dir():
             return str(models_dir)
@@ -74,7 +79,12 @@ class AppSettings:
 
 class SettingsStore:
     def __init__(self, path: str | Path | None = None) -> None:
-        self.path = Path(path) if path else Path.cwd() / "config" / "app_settings.json"
+        if path:
+            self.path = Path(path)
+        else:
+            env_dir = os.environ.get("YOLO_STUDIO_CONFIG_DIR", "").strip()
+            config_dir = Path(env_dir).expanduser() if env_dir else Path.cwd() / "config"
+            self.path = config_dir / "app_settings.json"
 
     def load(self) -> AppSettings:
         if not self.path.exists():
