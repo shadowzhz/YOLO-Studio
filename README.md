@@ -55,14 +55,22 @@ bash packaging/linux/build.sh
 #### 方式三：原生 Python 运行
 ```bash
 # 建议使用 Python 3.10 ~ 3.12
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 
-# 启动 PySide6 完整界面
+# 启动 PySide6 完整界面，无需激活虚拟环境
 python3 main.py
-# 或: python3 -m yolo_studio.qt_app
 ```
+
+如果系统 Python 版本较新（如 3.14），建议使用 uv 创建 Python 3.12 环境：
+```bash
+uv python install 3.12
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+python3 main.py
+```
+
+`main.py` 从系统 Python 启动时，会自动查找项目目录下的 `.venv`，其次是 `venv`，并使用其中的 Python 重新启动；GUI 和 CLI 均支持，参数原样保留。已使用虚拟环境或便携版运行时不会自动切换。原生运行的依赖需提前安装。Linux 上未使用虚拟环境、项目也没有可用的虚拟环境时，不带参数运行 `python3 main.py` 会调用 `scripts/run_gui.sh`，用 Docker 打开桌面界面。使用 `python3 -m yolo_studio.qt_app` 时仍需自行选择正确的 Python。
 
 ---
 
@@ -82,7 +90,13 @@ python3 main.py
 
 #### 从源码启动
 - 直接双击 **`scripts\start_windows.bat`**（自动创建虚拟环境并安装依赖）。
-- 如果当前 Python 环境已安装依赖，直接在根目录运行 **`python main.py`**（等价于 `python -m yolo_studio.qt_app`）。
+- 手动安装依赖后，直接在根目录运行 **`python main.py`**，无需激活虚拟环境。首次配置示例（CMD，需要 Python 3.12）：
+  ```bat
+  py -3.12 -m venv .venv
+  .venv\Scripts\python.exe -m pip install -r requirements.txt
+  python main.py
+  ```
+  根目录启动器会自动使用 `.venv\Scripts\python.exe`，也兼容一键脚本创建的 `venv`。Linux 与 Windows 的虚拟环境需分别创建，不能共用。
 
 #### 方式二：Docker Desktop 运行
 启动 Docker Desktop 后，双击 **`scripts\run_gui.bat`** 或在终端执行：

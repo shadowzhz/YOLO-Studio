@@ -1,3 +1,7 @@
+# 本地 Python 虚拟环境
+/.venv/
+/venv/
+
 # 字节码与缓存
 __pycache__/
 *.py[cod]

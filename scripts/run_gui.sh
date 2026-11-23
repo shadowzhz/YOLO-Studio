@@ -68,7 +68,7 @@ MODE="${1:-qt}"
 
 if [ "$MODE" = "tk" ]; then
     echo "🌟 正在启动 Tkinter 简化界面..."
-    docker run -it --rm \
+    exec docker run --rm \
         "${GPU_FLAGS[@]}" \
         --net=host \
         --ipc=host \
@@ -104,7 +104,7 @@ elif [ "$MODE" = "bash" ]; then
         /bin/bash
 else
     echo "🌟 正在启动 PySide6 完整图形界面..."
-    docker run -it --rm \
+    exec docker run --rm \
         "${GPU_FLAGS[@]}" \
         --net=host \
         --ipc=host \
